@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { trace, type Level } from '@/game/engine';
+import { previewLimit, trace, type Level } from '@/game/engine';
 import { generateLevel, featureFor, FALLBACK_LEVEL } from '@/game/generate';
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
 import { MemoryStore, setStoreForTests, nextStreak, liveStreak } from '@/server/store';
@@ -76,6 +76,16 @@ describe('pieces', () => {
     const res = trace(level, farMoon);
     expect(res.result).toBe('hit');
     expect(res.rays[0].pts.some((p) => p.jump)).toBe(true);
+  });
+});
+
+describe('aiming line', () => {
+  test('the scanner shows only 20% more of the aiming line', () => {
+    const g = generateLevel(DAY);
+    const res = trace(g.level, g.solution);
+    const normal = previewLimit(res, false);
+    expect(normal).toBeLessThanOrEqual(15);
+    expect(previewLimit(res, true)).toBeCloseTo(normal * 1.2);
   });
 });
 
