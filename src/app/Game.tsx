@@ -5,6 +5,7 @@ import { HELPER_ORDER, HELPERS, MAX_SHOTS, msUntilNextPuzzle, scoreFor, shareTex
 import type { OrbitScene } from '@/game/scene';
 import type { GhostHint, TodayPayload } from '@/server/game';
 import type { Play, Streak } from '@/server/store';
+import { track } from '@vercel/analytics';
 import Leaderboard from './Leaderboard';
 
 type Status = { text: string; kind?: 'good' | 'bad' };
@@ -171,6 +172,7 @@ export default function Game() {
       else if (res.result === 'rock') setStatus({ text: `Blocked by the asteroid belt.${tail}`, kind: 'bad' });
       else setStatus({ text: `Lost in deep space.${tail}`, kind: 'bad' });
       if (res.status !== 'playing') {
+        track('finished', { result: res.status, shots: res.play.shots.length, helpers: res.play.helpers.length, score: res.score });
         if (res.status === 'lost') setStatus({ text: 'Out of shots. The beacon stays dark today.', kind: 'bad' });
         setTimeout(() => setResultOpen(true), 900);
       }
@@ -200,6 +202,7 @@ export default function Game() {
   };
 
   const startPractice = () => {
+    track('practice_started');
     setResultOpen(false);
     setPractice(true);
     setStatus({ text: 'Practice mode: fire as often as you like. These shots don’t count toward the leaderboard.' });
@@ -219,6 +222,7 @@ export default function Game() {
     try {
       const r = await api<{ helpers: HelperId[]; ghost: GhostHint | null }>('/api/helper', { helper: id });
       setPlay((p) => ({ ...p, helpers: r.helpers }));
+      track('helper_used', { helper: id });
       setHelpersOpen(false);
       setGhost(r.ghost);
       if (id === 'satellite') {
@@ -387,6 +391,7 @@ function ResultCard({ level, play, streak, practice, onPractice, onClose, onBoar
       .catch(() => setRank(null));
   }, []);
   const copy = () => {
+    track('shared', { result: play.status });
     navigator.clipboard.writeText(text).then(() => { setCopied('Copied'); setTimeout(() => setCopied('Copy result'), 1600); }, () => {
       const r = document.createRange(); r.selectNodeContents(shareRef.current!); const s = getSelection()!; s.removeAllRanges(); s.addRange(r);
       setCopied('Press Ctrl+C');
