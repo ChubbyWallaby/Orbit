@@ -39,7 +39,7 @@ export function msUntilNextPuzzle(now = new Date()): number {
   return next - now.getTime();
 }
 
-export function shareText(opts: { number: number; shots: string[]; score: number; helpers: HelperId[] }): string {
+export function shareText(opts: { number: number; shots: string[]; score: number; helpers: HelperId[]; streak?: number }): string {
   const squares = opts.shots.map((r) => (r === 'hit' ? '🟩' : '🟥')).join('') + '⬛'.repeat(MAX_SHOTS - opts.shots.length);
   const helperIcons = opts.helpers.map((h) => ({ scanner: '📡', satellite: '🛰️', ghost: '👻' })[h]).join('');
   const won = opts.shots.includes('hit');
@@ -47,5 +47,6 @@ export function shareText(opts: { number: number; shots: string[]; score: number
     `ORBIT #${opts.number} 🪐`,
     `${squares}  ${won ? opts.score + ' pts' : 'beacon dark'}`,
     helperIcons ? `helpers ${helperIcons}` : 'no helpers',
+    ...(opts.streak && opts.streak > 1 ? [`🔥 ${opts.streak}-day streak`] : []),
   ].join('\n');
 }

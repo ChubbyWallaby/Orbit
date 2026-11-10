@@ -42,6 +42,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--mirror); ou
 .pip.won { background: var(--beacon); border-color: var(--beacon); box-shadow: 0 0 10px rgba(92, 242, 192, 0.7); }
 .chip { font-family: var(--mono); font-size: 12px; border: 1px solid var(--line); background: var(--glass); border-radius: 999px; padding: 6px 12px; backdrop-filter: blur(8px); white-space: nowrap; }
 .chip:hover { border-color: var(--dim); }
+.chip.streak { color: var(--gold); border-color: rgba(255, 207, 112, 0.4); }
+.meta.piece { color: var(--mirror); }
 
 .helpers { top: calc(env(safe-area-inset-top, 0px) + 84px); right: var(--gutter-r); width: 230px; display: grid; gap: 8px; }
 .helpers h2 { margin: 0; font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
@@ -119,6 +121,8 @@ tr.gap td { text-align: center; color: var(--dim); padding: 2px; border: none; }
   .potential { flex-basis: 100%; }
   .row .btn { flex: 1; }
   .board-head h2 { font-size: 22px; }
+  th, td { padding: 7px 5px; }
+  th { font-size: 10px; letter-spacing: 0.04em; }
 }
 @media (max-width: 480px) {
   .wordmark { font-size: 21px; }

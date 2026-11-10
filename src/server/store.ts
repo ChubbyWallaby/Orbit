@@ -6,7 +6,8 @@ import type { HelperId } from '@/game/rules';
 
 export type PlayStatus = 'playing' | 'won' | 'lost';
 export type Play = { shots: string[]; helpers: HelperId[]; status: PlayStatus; score: number };
-export type BoardEntry = { rank: number; name: string; score: number; games: number; you: boolean };
+export type BoardEntry = { rank: number; name: string; score: number; games: number; best: number; you: boolean };
+export type Streak = { current: number; best: number };
 
 export interface Store {
   getName(pid: string): Promise<string | null>;
@@ -19,6 +20,28 @@ export interface Store {
   /** Finishes the day once. Returns false if it was already finished. */
   finish(day: string, pid: string, status: 'won' | 'lost', score: number): Promise<boolean>;
   board(scope: 'day' | 'all', day: string, pid: string | null, limit?: number): Promise<{ top: BoardEntry[]; me: BoardEntry | null; players: number }>;
+  getStreak(pid: string, day: string): Promise<Streak>;
+  getCached(key: string): Promise<string | null>;
+  setCached(key: string, value: string, ttlSeconds: number): Promise<void>;
+}
+
+export function prevDay(day: string): string {
+  return new Date(Date.parse(day + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
+}
+
+type StreakRow = { current: number; best: number; last: string };
+/** Streak = consecutive days with the beacon lit. A loss resets it; a skipped day breaks it. */
+export function nextStreak(prev: StreakRow | null, day: string, won: boolean): StreakRow {
+  const best = prev?.best ?? 0;
+  if (!won) return { current: 0, best, last: day };
+  const current = prev && prev.last === prevDay(day) ? prev.current + 1 : 1;
+  return { current, best: Math.max(best, current), last: day };
+}
+/** The streak as it stands on `day`: still alive if the last win was today or yesterday. */
+export function liveStreak(row: StreakRow | null, day: string): Streak {
+  if (!row) return { current: 0, best: 0 };
+  const alive = row.last === day || row.last === prevDay(day);
+  return { current: alive ? row.current : 0, best: row.best };
 }
 
 const DAY_TTL = 60 * 60 * 24 * 90;
@@ -30,6 +53,9 @@ const k = {
   dayBoard: (day: string) => `orbit:lb:day:${day}`,
   allBoard: 'orbit:lb:all',
   games: 'orbit:lb:games',
+  best: 'orbit:lb:best',
+  streak: (pid: string) => `orbit:player:${pid}:streak`,
+  cache: (key: string) => `orbit:cache:${key}`,
 };
 
 class RedisStore implements Store {
@@ -69,13 +95,32 @@ class RedisStore implements Store {
     const first = await this.r.set(k.done(day, pid), 1, { nx: true, ex: DAY_TTL });
     if (first !== 'OK') return false;
     await this.r.hset(k.play(day, pid), { status, score });
+    const prev = await this.streakRow(pid);
+    const st = nextStreak(prev, day, status === 'won');
     const p = this.r.pipeline();
+    p.hset(k.streak(pid), st);
+    p.hset(k.best, { [pid]: st.best });
     p.zadd(k.dayBoard(day), { score, member: pid });
     p.expire(k.dayBoard(day), DAY_TTL);
     p.zincrby(k.allBoard, score, pid);
     p.hincrby(k.games, pid, 1);
     await p.exec();
     return true;
+  }
+  private async streakRow(pid: string): Promise<StreakRow | null> {
+    const h = await this.r.hgetall<Record<string, unknown>>(k.streak(pid));
+    return h && h.last ? { current: Number(h.current ?? 0), best: Number(h.best ?? 0), last: String(h.last) } : null;
+  }
+  async getStreak(pid: string, day: string) {
+    return liveStreak(await this.streakRow(pid), day);
+  }
+  async getCached(key: string) {
+    const v = await this.r.get<unknown>(k.cache(key));
+    if (v === null || v === undefined) return null;
+    return typeof v === 'string' ? v : JSON.stringify(v); // the client may auto-parse JSON
+  }
+  async setCached(key: string, value: string, ttlSeconds: number) {
+    await this.r.set(k.cache(key), value, { ex: ttlSeconds });
   }
   async board(scope: 'day' | 'all', day: string, pid: string | null, limit = 50) {
     const key = scope === 'day' ? k.dayBoard(day) : k.allBoard;
@@ -94,11 +139,16 @@ class RedisStore implements Store {
     const ids = [...rows.map((r) => r.pid), ...(myRow ? [myRow.pid] : [])];
     let names: (string | null)[] = [];
     let games: Record<string, unknown> | null = null;
+    let bests: Record<string, unknown> | null = null;
     if (ids.length) {
-      [names, games] = await Promise.all([this.r.mget<(string | null)[]>(...ids.map(k.name)), this.r.hmget<Record<string, unknown>>(k.games, ...ids)]);
+      [names, games, bests] = await Promise.all([
+        this.r.mget<(string | null)[]>(...ids.map(k.name)),
+        this.r.hmget<Record<string, unknown>>(k.games, ...ids),
+        this.r.hmget<Record<string, unknown>>(k.best, ...ids),
+      ]);
     }
     const entry = (id: string, score: number, rank: number, idx: number): BoardEntry => ({
-      rank, name: names[idx] ?? 'Unknown pilot', score, games: Number(games?.[id] ?? 0), you: id === pid,
+      rank, name: names[idx] ?? 'Unknown pilot', score, games: Number(games?.[id] ?? 0), best: Number(bests?.[id] ?? 0), you: id === pid,
     });
     const top = rankRows(rows).map((r, i) => entry(r.pid, r.score, r.rank, i));
     if (myRow) me = entry(myRow.pid, myRow.score, myRow.rank, ids.length - 1);
@@ -124,6 +174,11 @@ export class MemoryStore implements Store {
   dayBoards = new Map<string, Map<string, number>>();
   allBoard = new Map<string, number>();
   games = new Map<string, number>();
+  streaks = new Map<string, StreakRow>();
+  cache = new Map<string, string>();
+  async getStreak(pid: string, day: string) { return liveStreak(this.streaks.get(pid) ?? null, day); }
+  async getCached(key: string) { return this.cache.get(key) ?? null; }
+  async setCached(key: string, value: string) { this.cache.set(key, value); }
   async getName(pid: string) { return this.names.get(pid) ?? null; }
   async setName(pid: string, name: string) { this.names.set(pid, name); }
   private play(day: string, pid: string) {
@@ -154,13 +209,14 @@ export class MemoryStore implements Store {
     this.dayBoards.get(day)!.set(pid, score);
     this.allBoard.set(pid, (this.allBoard.get(pid) ?? 0) + score);
     this.games.set(pid, (this.games.get(pid) ?? 0) + 1);
+    this.streaks.set(pid, nextStreak(this.streaks.get(pid) ?? null, day, status === 'won'));
     return true;
   }
   async board(scope: 'day' | 'all', day: string, pid: string | null, limit = 50) {
     const m = scope === 'day' ? this.dayBoards.get(day) ?? new Map<string, number>() : this.allBoard;
     const sorted = rankRows([...m.entries()].map(([id, score]) => ({ pid: id, score })).sort((a, b) => b.score - a.score || (a.pid < b.pid ? 1 : -1)));
     const toEntry = (r: { pid: string; score: number; rank: number }): BoardEntry => ({
-      rank: r.rank, name: this.names.get(r.pid) ?? 'Unknown pilot', score: r.score, games: this.games.get(r.pid) ?? 0, you: r.pid === pid,
+      rank: r.rank, name: this.names.get(r.pid) ?? 'Unknown pilot', score: r.score, games: this.games.get(r.pid) ?? 0, best: this.streaks.get(r.pid)?.best ?? 0, you: r.pid === pid,
     });
     const mine = sorted.find((r) => r.pid === pid);
     return { top: sorted.slice(0, limit).map(toEntry), me: mine ? toEntry(mine) : null, players: sorted.length };

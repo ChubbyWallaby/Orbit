@@ -7,6 +7,11 @@ A daily 3D space puzzle. A station fires a laser that bends around planets. Drag
 - A hit on shot 1, 2 or 3 scores 1,000, 700 or 400 points.
 - Helpers cost points if you win: Long-range scanner −150, Mirror satellite −200, Ghost moon −300 (minimum win score 50).
 - Missing all three shots scores 0, and the game still counts.
+- Streak: consecutive days with the beacon lit. A miss or a skipped day resets it. The leaderboard shows each pilot's best streak.
+
+## Puzzle pieces
+
+Most days add one special piece, placed on the laser's path: a **black hole** (strong gravity, swallows light), a **beam splitter** (splits the laser in two; either beam can win) or a **wormhole pair** (light enters one mouth and leaves the other).
 - The all-time leaderboard adds up every day's points. There is also a board for today.
 
 Every shot is checked on the server: it re-runs the physics, counts the shot, and computes the score, so the browser cannot claim a result.
@@ -28,6 +33,8 @@ npm run dev
 ```
 
 Without Redis credentials the app uses an in-memory store that resets when the server restarts.
+
+To play a different day's puzzle while testing, set `ORBIT_DAY`, for example `ORBIT_DAY=2026-11-14 npm run dev`. This is ignored in production.
 
 ```bash
 npm test

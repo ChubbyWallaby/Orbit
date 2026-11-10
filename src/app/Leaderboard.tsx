@@ -46,10 +46,10 @@ export default function Leaderboard({ onClose, puzzleNumber }: { onClose: () => 
             <p className="empty">No scores yet. Finish today’s puzzle to be the first.</p>
           ) : (
             <table>
-              <thead><tr><th>#</th><th>Pilot</th><th className="num">Games</th><th className="num">Points</th></tr></thead>
+              <thead><tr><th>#</th><th>Pilot</th><th className="num">Games</th><th className="num" title="Longest run of days with the beacon lit">Best streak</th><th className="num">Points</th></tr></thead>
               <tbody>
                 {board.top.map((e, i) => <Row key={i} e={e} />)}
-                {meOutside && <tr className="gap"><td colSpan={4}>⋯</td></tr>}
+                {meOutside && <tr className="gap"><td colSpan={5}>⋯</td></tr>}
                 {meOutside && board.me && <Row e={board.me} />}
               </tbody>
             </table>
@@ -67,6 +67,7 @@ function Row({ e }: { e: BoardEntry }) {
       <td className={`rank ${e.rank === 1 ? 'medal-1' : ''}`}>{e.rank}</td>
       <td>{e.name}{e.you ? ' (you)' : ''}</td>
       <td className="num">{e.games}</td>
+      <td className="num">{e.best}</td>
       <td className="num">{e.score.toLocaleString('en')}</td>
     </tr>
   );

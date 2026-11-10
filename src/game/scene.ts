@@ -5,7 +5,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { constrainMoon, MOON_MIRROR_OFFSET, SATELLITE_RADIUS, type Level, type Placement, type TraceResult, type Vec } from './engine';
+import { constrainMoon, indexAt, MOON_MIRROR_OFFSET, SATELLITE_RADIUS, type Level, type Placement, type Ray, type TraceResult, type Vec } from './engine';
 
 const NOISE = `
 float h3(vec3 p){ p = fract(p*0.3183099+.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
@@ -78,12 +78,17 @@ function mirrorPanel(length: number) {
   return g;
 }
 
-function beamGeometry(pts: Vec[]) {
+/** Two crossed ribbons per segment (12 indices each, so draw ranges map to point indices). */
+function beamGeometry(pts: (Vec & { jump?: boolean })[]) {
   const w = 0.11, pos: number[] = [], idx: number[] = [];
   for (let i = 0; i < pts.length - 1; i++) {
-    const a = pts[i], b = pts[i + 1];
-    let dx = b.x - a.x, dz = b.z - a.z; const l = Math.hypot(dx, dz); if (l < 1e-6) continue; dx /= l; dz /= l;
-    for (const o of [[-dz * w, 0, dx * w], [0, w, 0]]) {
+    const a = pts[i];
+    // a wormhole jump draws nothing: collapse the segment to a point
+    const b = pts[i + 1].jump ? a : pts[i + 1];
+    let dx = b.x - a.x, dz = b.z - a.z; const l = Math.hypot(dx, dz);
+    if (l < 1e-6) { dx = 1; dz = 0; } else { dx /= l; dz /= l; }
+    const ww = l < 1e-6 ? 0 : w;
+    for (const o of [[-dz * ww, 0, dx * ww], [0, ww, 0]]) {
       const base = pos.length / 3;
       pos.push(a.x - o[0], -o[1], a.z - o[2], a.x + o[0], o[1], a.z + o[2], b.x - o[0], -o[1], b.z - o[2], b.x + o[0], o[1], b.z + o[2]);
       idx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
@@ -114,14 +119,14 @@ export class OrbitScene {
   private grid!: THREE.LineSegments;
   private gridPos!: Float32Array;
   private gridCol!: Float32Array;
-  private preview: THREE.Line | null = null;
-  private beam: THREE.Mesh | null = null;
+  private preview = new THREE.Group();
+  private beams = new THREE.Group();
+  private sparks: THREE.Mesh[] = [];
   private beamMat = new THREE.MeshBasicMaterial({ color: LASER.clone().multiplyScalar(2.6), toneMapped: false, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
   private previewMat = new THREE.LineDashedMaterial({ color: LASER.clone().multiplyScalar(1.4), dashSize: 0.45, gapSize: 0.35, transparent: true, opacity: 0.85, toneMapped: false });
-  private spark: THREE.Mesh;
   private flash: THREE.Mesh;
   private flashT = -1;
-  private firing: { pts: Vec[]; t0: number; dur: number; total: number; done: () => void } | null = null;
+  private firing: { rays: Ray[]; meshes: THREE.Mesh[]; t0: number; dur: number; length: number; done: () => void } | null = null;
   private dragging: Drag | null = null;
   private dragOffset = new THREE.Vector2();
   private ray = new THREE.Raycaster();
@@ -155,12 +160,10 @@ export class OrbitScene {
     const sun = new THREE.DirectionalLight(0xfff1dd, 2.6); sun.position.copy(SUN).multiplyScalar(50);
     this.scene.add(sun, new THREE.AmbientLight(0x6070a0, 0.35), this.levelGroup);
 
-    this.spark = new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 12), new THREE.MeshBasicMaterial({ color: hdr(0xffd0d8, 4), toneMapped: false }));
-    this.spark.visible = false;
     this.flash = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), new THREE.MeshBasicMaterial({ color: hdr(0xffffff, 3), toneMapped: false, transparent: true, opacity: 0 }));
     this.ghost = new THREE.Mesh(new THREE.RingGeometry(2.8, 3, 96), new THREE.MeshBasicMaterial({ color: hdr(MIRROR, 1.3), toneMapped: false, transparent: true, opacity: 0.7, side: THREE.DoubleSide }));
     this.ghost.rotation.x = -Math.PI / 2; this.ghost.visible = false;
-    this.scene.add(this.spark, this.flash, this.ghost);
+    this.scene.add(this.flash, this.ghost, this.preview, this.beams);
 
     this.buildMoon();
     this.buildSatellite();
@@ -252,6 +255,31 @@ export class OrbitScene {
     this.animated.push({ tick: (t) => { (grab.material as THREE.MeshBasicMaterial).opacity = this.locked ? 0.1 : 0.3 + Math.sin(t * 2.4 + 1) * 0.2; } });
   }
 
+  private buildBlackHole(grp: THREE.Group, r: number) {
+    const hole = new THREE.Mesh(new THREE.SphereGeometry(r, 48, 32), new THREE.MeshBasicMaterial({ color: 0x000000 }));
+    const lens = new THREE.Mesh(new THREE.SphereGeometry(r * 1.9, 48, 32), new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.BackSide,
+      vertexShader: `varying vec3 vN; varying vec3 vW; void main(){ vN = normalize(mat3(modelMatrix)*normal); vec4 w = modelMatrix*vec4(position,1.); vW=w.xyz; gl_Position = projectionMatrix*viewMatrix*w; }`,
+      fragmentShader: `varying vec3 vN; varying vec3 vW; void main(){ vec3 V = normalize(cameraPosition - vW);
+        float f = pow(clamp(1.0 - abs(dot(vN, V)), 0., 1.), 5.0); gl_FragColor = vec4(vec3(1.0,0.75,0.45)*f*1.4, f); }`,
+    }));
+    const disk = new THREE.Mesh(new THREE.RingGeometry(r * 1.3, r * 3.4, 128, 1), new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+      uniforms: { uT: { value: 0 }, uIn: { value: r * 1.3 }, uOut: { value: r * 3.4 } },
+      vertexShader: `varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.); }`,
+      fragmentShader: NOISE + `uniform float uT; uniform float uIn; uniform float uOut; varying vec3 vP; void main(){
+        float rr = length(vP.xy); float t = (rr-uIn)/(uOut-uIn); float a = atan(vP.y, vP.x);
+        float n = fbm(vec3(cos(a)*2.0 + uT*0.0, sin(a)*2.0, rr*3.0 - uT*0.8));
+        float glow = pow(1.0 - t, 2.2) * (0.5 + n);
+        vec3 c = mix(vec3(1.0,0.35,0.1), vec3(1.0,0.9,0.7), pow(1.0-t, 3.0)) * glow * 2.2;
+        gl_FragColor = vec4(c, glow * smoothstep(0.0, 0.08, t)); }`,
+    }));
+    disk.rotation.x = -Math.PI / 2 + 0.25;
+    grp.add(hole, lens, disk);
+    const mat = disk.material as THREE.ShaderMaterial;
+    this.animated.push({ tick: (t) => { mat.uniforms.uT.value = t; disk.rotation.z = t * 0.4; } });
+  }
+
   setLevel(level: Level) {
     this.level = level;
     this.levelGroup.clear();
@@ -260,7 +288,8 @@ export class OrbitScene {
 
     level.bodies.forEach((b, i) => {
       const grp = new THREE.Group(); grp.position.set(b.x, 0, b.z);
-      const mat = planetMaterial(b.kind, i * 3.7 + b.r);
+      if (b.kind === 'blackhole') { this.buildBlackHole(grp, b.r); g.add(grp); return; }
+      const mat = planetMaterial(b.kind === 'giant' ? 'giant' : 'planet', i * 3.7 + b.r);
       const ball = new THREE.Mesh(new THREE.SphereGeometry(b.r, 96, 64), mat); ball.rotation.z = 0.12;
       grp.add(ball, new THREE.Mesh(new THREE.SphereGeometry(b.r * 1.12, 64, 48), haloMaterial(b.kind === 'giant' ? new THREE.Color(1, 0.55, 0.25) : new THREE.Color(0.4, 0.7, 1))));
       if (b.kind === 'giant') {
@@ -308,6 +337,45 @@ export class OrbitScene {
       light.intensity = 3 + Math.sin(t * 3) * 1.2 + (this.won ? 10 : 0);
       coreMat.color.copy(hdr(BEACON, this.won ? 4 : 1.6));
     } });
+
+    // beam splitters
+    for (const sp of level.splitters ?? []) {
+      const grp = new THREE.Group(); grp.position.set(sp.x, 0, sp.z); grp.rotation.y = (-sp.angle * Math.PI) / 180;
+      const L = sp.half * 2;
+      const crystal = new THREE.Mesh(new THREE.BoxGeometry(0.16, 1.3, L), new THREE.MeshPhysicalMaterial({ color: 0xe9d8ff, metalness: 0.1, roughness: 0.05, transmission: 0.6, transparent: true, opacity: 0.55, emissive: 0x6a3cc0, emissiveIntensity: 0.6 }));
+      const edges = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(0.18, 1.32, L + 0.02)), new THREE.LineBasicMaterial({ color: hdr(0xc9a2ff, 2.2), toneMapped: false }));
+      const base = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.25, 0.4, 8), new THREE.MeshStandardMaterial({ color: 0x9aa3b5, metalness: 0.8, roughness: 0.3 })); base.position.y = -0.85;
+      grp.add(crystal, edges, base); g.add(grp);
+      this.animated.push({ tick: (t) => { (edges.material as THREE.LineBasicMaterial).color.copy(hdr(0xc9a2ff, 1.8 + Math.sin(t * 2) * 0.5)); } });
+    }
+
+    // wormholes
+    for (const w of level.wormholes ?? []) {
+      for (const [m, hue] of [[w.a, 0x7bf6ff], [w.b, 0xff8bf0]] as const) {
+        const grp = new THREE.Group(); grp.position.set(m.x, 0, m.z);
+        const swirl = new THREE.Mesh(new THREE.CircleGeometry(w.r * 1.25, 64), new THREE.ShaderMaterial({
+          transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+          uniforms: { uT: { value: 0 }, uC: { value: new THREE.Color(hue) } },
+          vertexShader: `varying vec2 vU; void main(){ vU = uv - 0.5; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.); }`,
+          fragmentShader: `uniform float uT; uniform vec3 uC; varying vec2 vU; void main(){
+            float r = length(vU)*2.0; float a = atan(vU.y, vU.x);
+            float s = sin(a*3.0 + r*10.0 - uT*3.0)*0.5+0.5;
+            float core = smoothstep(0.35, 0.0, r);
+            float rim = smoothstep(1.0, 0.75, r) * smoothstep(0.2, 0.7, r);
+            vec3 c = uC * (rim * (0.4 + 0.8*s)) * 1.8 + vec3(0.02,0.0,0.05) * core;
+            gl_FragColor = vec4(c, rim*0.9 + core*0.8); }`,
+        }));
+        swirl.rotation.x = -Math.PI / 2;
+        const ring = new THREE.Mesh(new THREE.TorusGeometry(w.r * 1.25, 0.05, 8, 64), new THREE.MeshBasicMaterial({ color: hdr(hue, 1.6), toneMapped: false }));
+        ring.rotation.x = Math.PI / 2;
+        grp.add(swirl, ring); g.add(grp);
+        const mat = swirl.material as THREE.ShaderMaterial;
+        this.animated.push({ tick: (t) => { mat.uniforms.uT.value = t; ring.rotation.z = t * 0.6; } });
+      }
+      // faint link between the mouths
+      const link = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(w.a.x, -0.6, w.a.z), new THREE.Vector3(w.b.x, -0.6, w.b.z)]), new THREE.LineDashedMaterial({ color: 0x8a7bd0, dashSize: 0.3, gapSize: 0.6, transparent: true, opacity: 0.35 }));
+      link.computeLineDistances(); g.add(link);
+    }
 
     // rocks
     const rockMat = new THREE.MeshStandardMaterial({ color: 0x6d6358, roughness: 1, flatShading: true });
@@ -376,13 +444,28 @@ export class OrbitScene {
     if (movedMoon && this.level) this.updateGrid(p.moon);
   }
 
-  setPreview(res: TraceResult | null, cut: number) {
-    if (this.preview) { this.scene.remove(this.preview); this.preview.geometry.dispose(); this.preview = null; }
+  /** Draws the dashed aiming line for every ray up to light-travel distance `limit`. */
+  setPreview(res: TraceResult | null, limit: number) {
+    for (const c of [...this.preview.children]) { this.preview.remove(c); (c as THREE.Line).geometry.dispose(); }
     if (!res) return;
-    const pts = res.pts.slice(0, cut + 1).map((p) => new THREE.Vector3(p.x, 0, p.z));
-    this.preview = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), this.previewMat);
-    this.preview.computeLineDistances();
-    this.scene.add(this.preview);
+    for (const ray of res.rays) {
+      const last = indexAt(ray, limit);
+      if (last < 1) continue;
+      let run: THREE.Vector3[] = [];
+      const flush = () => {
+        if (run.length > 1) {
+          const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(run), this.previewMat);
+          line.computeLineDistances(); this.preview.add(line);
+        }
+        run = [];
+      };
+      for (let i = 0; i <= last; i++) {
+        const p = ray.pts[i];
+        if (p.jump) flush();
+        run.push(new THREE.Vector3(p.x, 0, p.z));
+      }
+      flush();
+    }
   }
 
   setGhost(g: { x: number; z: number; radius: number } | null) {
@@ -393,25 +476,32 @@ export class OrbitScene {
   setWon(won: boolean) { this.won = won; }
 
   clearBeam() {
-    if (this.beam) { this.scene.remove(this.beam); this.beam.geometry.dispose(); this.beam = null; }
-    this.spark.visible = false;
+    for (const c of [...this.beams.children]) { this.beams.remove(c); (c as THREE.Mesh).geometry?.dispose(); }
+    this.sparks = [];
   }
 
   showBeam(res: TraceResult) {
     this.clearBeam();
-    this.beam = new THREE.Mesh(beamGeometry(res.pts), this.beamMat);
-    this.scene.add(this.beam);
+    for (const ray of res.rays) this.beams.add(new THREE.Mesh(beamGeometry(ray.pts), this.beamMat));
   }
 
   fire(res: TraceResult): Promise<void> {
     this.clearBeam();
-    const geo = beamGeometry(res.pts);
-    this.beam = new THREE.Mesh(geo, this.beamMat); geo.setDrawRange(0, 0); this.scene.add(this.beam);
+    const meshes = res.rays.map((ray) => {
+      const m = new THREE.Mesh(beamGeometry(ray.pts), this.beamMat);
+      m.geometry.setDrawRange(0, 0); this.beams.add(m);
+      const spark = new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 12), new THREE.MeshBasicMaterial({ color: hdr(0xffd0d8, 4), toneMapped: false }));
+      spark.visible = false; this.beams.add(spark); this.sparks.push(spark);
+      return m;
+    });
+    const length = Math.max(...res.rays.map((r) => r.dist[r.dist.length - 1]));
     return new Promise((done) => {
-      this.firing = { pts: res.pts, t0: performance.now(), dur: this.reduceMotion ? 200 : Math.min(2600, 500 + res.pts.length * 1.6), total: geo.index!.count, done: () => {
-        const last = res.pts[res.pts.length - 1];
-        const color = res.result === 'hit' ? BEACON : res.result === 'rock' ? 0xff9a6e : 0xff4f6e;
-        if (res.result !== 'lost') this.flashAt(last, color);
+      this.firing = { rays: res.rays, meshes, t0: performance.now(), length, dur: this.reduceMotion ? 200 : Math.min(3000, 500 + length * 28), done: () => {
+        for (const ray of res.rays) {
+          const last = ray.pts[ray.pts.length - 1];
+          if (ray.result === 'lost') continue;
+          this.flashAt(last, ray.result === 'hit' ? BEACON : ray.result === 'rock' ? 0xff9a6e : 0xff4f6e);
+        }
         done();
       } };
     });
@@ -469,18 +559,22 @@ export class OrbitScene {
     for (const a of this.animated) a.tick(t, this.reduceMotion ? dt * 0.15 : dt);
     this.ghost.rotation.z = t * 0.3;
     if (this.firing) {
-      const F = this.firing, k = Math.max(0, Math.min(1, (now - F.t0) / F.dur));
-      this.beam!.geometry.setDrawRange(0, Math.floor((F.total * k) / 6) * 6);
-      const P = F.pts[Math.min(F.pts.length - 1, Math.floor(k * (F.pts.length - 1)))];
-      this.spark.visible = true; this.spark.position.set(P.x, 0, P.z); this.spark.scale.setScalar(1 + Math.sin(now * 0.04) * 0.25);
-      if (k >= 1) { this.spark.visible = false; this.beam!.geometry.setDrawRange(0, Infinity); this.firing = null; F.done(); }
+      const F = this.firing, k = Math.max(0, Math.min(1, (now - F.t0) / F.dur)), d = k * F.length;
+      F.rays.forEach((ray, i) => {
+        const at = indexAt(ray, d), spark = this.sparks[i];
+        F.meshes[i].geometry.setDrawRange(0, Math.max(0, at) * 12);
+        const done = at >= ray.pts.length - 1;
+        spark.visible = at >= 0 && !done && k < 1;
+        if (spark.visible) { const P = ray.pts[at]; spark.position.set(P.x, 0, P.z); spark.scale.setScalar(1 + Math.sin(now * 0.04) * 0.25); }
+      });
+      if (k >= 1) { for (const sp of this.sparks) sp.visible = false; this.firing = null; F.done(); }
     }
     if (this.flashT > 0) {
       const k = Math.max(0, (now - this.flashT) / 700);
       const m = this.flash.material as THREE.MeshBasicMaterial;
       if (k >= 1) { m.opacity = 0; this.flashT = -1; } else { m.opacity = (1 - k) * 0.9; this.flash.scale.setScalar(0.4 + k * 3); }
     }
-    if (this.beam && !this.firing) this.beamMat.color.copy(LASER).multiplyScalar(2.2 + Math.sin(t * 9) * 0.35);
+    if (this.beams.children.length && !this.firing) this.beamMat.color.copy(LASER).multiplyScalar(2.2 + Math.sin(t * 9) * 0.35);
     this.controls.update();
     this.composer.render();
     this.raf = requestAnimationFrame(this.tick);

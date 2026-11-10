@@ -1,10 +1,10 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { constrainMoon, previewCut, trace, SATELLITE_RADIUS, type Level, type Placement, type TraceResult, type Vec } from '@/game/engine';
+import { constrainMoon, previewLimit, trace, SATELLITE_RADIUS, type Level, type Placement, type TraceResult, type Vec } from '@/game/engine';
 import { HELPER_ORDER, HELPERS, MAX_SHOTS, msUntilNextPuzzle, scoreFor, shareText, type HelperId } from '@/game/rules';
 import type { OrbitScene } from '@/game/scene';
 import type { GhostHint, TodayPayload } from '@/server/game';
-import type { Play } from '@/server/store';
+import type { Play, Streak } from '@/server/store';
 import Leaderboard from './Leaderboard';
 
 type Status = { text: string; kind?: 'good' | 'bad' };
@@ -30,6 +30,15 @@ function loadPlacement(level: Level): Placement {
 
 const START_TEXT = 'Drag the moon into the beam. Turn its mirror. Light the beacon.';
 
+/** What is special about today's level, if anything. */
+function todaysPiece(level: Level): { label: string; intro: string } | null {
+  const bh = level.bodies.find((b) => b.kind === 'blackhole');
+  if (bh) return { label: `Black hole · ${bh.name}`, intro: `Today: black hole ${bh.name}. It bends light hard, and light that gets too close never comes back.` };
+  if (level.splitters?.length) return { label: 'Beam splitter', intro: 'Today: a beam splitter. It splits the laser in two. Either beam can light the beacon.' };
+  if (level.wormholes?.length) return { label: 'Wormhole pair', intro: 'Today: a wormhole pair. Light that enters one mouth leaves the other, still heading the same way.' };
+  return null;
+}
+
 export default function Game() {
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<OrbitScene | null>(null);
@@ -38,6 +47,7 @@ export default function Game() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [placement, setPlacement] = useState<Placement | null>(null);
   const [play, setPlay] = useState<Play>({ shots: [], helpers: [], status: 'playing', score: 0 });
+  const [streak, setStreak] = useState<Streak>({ current: 0, best: 0 });
   const [ghost, setGhost] = useState<GhostHint | null>(null);
   const [name, setName] = useState<string | null>(null);
   const [nameOpen, setNameOpen] = useState(false);
@@ -73,7 +83,9 @@ export default function Game() {
   // load today's puzzle
   useEffect(() => {
     api<TodayPayload>('/api/today').then((d) => {
-      setData(d); setPlay(d.me.play); setGhost(d.ghost); setName(d.me.name);
+      setData(d); setPlay(d.me.play); setGhost(d.ghost); setName(d.me.name); setStreak(d.me.streak);
+      const piece = todaysPiece(d.level);
+      if (piece) setStatus({ text: piece.intro });
       const p = loadPlacement(d.level);
       if (!d.me.play.helpers.includes('satellite')) p.satellite = null;
       setPlacement(p);
@@ -106,7 +118,7 @@ export default function Game() {
     s.setWon(play.status === 'won');
     if (!busy) {
       if (finished) { s.setPreview(null, 0); s.showBeam(preview); }
-      else { s.setPreview(preview, previewCut(preview, helpers.includes('scanner'))); }
+      else { s.setPreview(preview, previewLimit(preview, helpers.includes('scanner'))); }
     }
     try { localStorage.setItem(placementKey(level.day), JSON.stringify(placement)); } catch { /* ignore */ }
   }, [sceneReady, level, placement, preview, helpers, finished, busy, play.status]);
@@ -121,13 +133,17 @@ export default function Game() {
     const s = sceneRef.current;
     s?.setPreview(null, 0); s?.clearBeam();
     try {
-      const res = await api<{ result: TraceResult['result']; hitName: string | null; score: number; status: Play['status']; play: Play }>('/api/shot', { placement });
+      const res = await api<{ result: TraceResult['result']; hitName: string | null; score: number; status: Play['status']; play: Play; streak: Streak }>('/api/shot', { placement });
       if (s && preview) await s.fire(preview);
       setPlay(res.play);
+      setStreak(res.streak);
       const left = MAX_SHOTS - res.play.shots.length;
       const tail = left ? ` ${left} ${left === 1 ? 'shot' : 'shots'} left.` : '';
       if (res.result === 'hit') setStatus({ text: `Beacon lit! +${res.score} points.`, kind: 'good' });
-      else if (res.result === 'absorbed') setStatus({ text: `Pulled into ${res.hitName}.${tail}`, kind: 'bad' });
+      else if (res.result === 'absorbed') {
+        const isHole = level.bodies.some((b) => b.kind === 'blackhole' && b.name === res.hitName);
+        setStatus({ text: `${isHole ? 'Swallowed by black hole' : 'Pulled into'} ${res.hitName}.${tail}`, kind: 'bad' });
+      }
       else if (res.result === 'rock') setStatus({ text: `Blocked by the asteroid belt.${tail}`, kind: 'bad' });
       else setStatus({ text: `Lost in deep space.${tail}`, kind: 'bad' });
       if (res.status !== 'playing') {
@@ -173,13 +189,17 @@ export default function Game() {
       <header className="hud top">
         <div className="brand">
           <h1 className="wordmark">ORB<span>I</span>T</h1>
+          {level && todaysPiece(level) && <div className="meta piece">{todaysPiece(level)!.label}</div>}
           <div className="meta">{level ? `Daily #${level.number} · ${new Date(level.day + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })}` : 'Loading today’s puzzle…'}</div>
         </div>
         <div className="right">
           <div className="pips" aria-label={`${MAX_SHOTS - play.shots.length} shots left`}>
             {Array.from({ length: MAX_SHOTS }, (_, i) => <span key={i} className={`pip ${play.shots[i] === 'hit' ? 'won' : play.shots[i] ? 'used' : ''}`} />)}
           </div>
-          <button className="chip" onClick={() => setBoardOpen(true)}>Leaderboard</button>
+          <div className="row" style={{ gap: 6 }}>
+            {streak.current > 0 && <span className="chip streak" title={`Best streak: ${streak.best}`}>Streak {streak.current}</span>}
+            <button className="chip" onClick={() => setBoardOpen(true)}>Leaderboard</button>
+          </div>
         </div>
       </header>
 
@@ -246,7 +266,7 @@ export default function Game() {
           onSkip={() => { setNameOpen(false); pendingFire.current = false; }}
         />
       )}
-      {resultOpen && level && <ResultCard level={level} play={play} onClose={() => setResultOpen(false)} onBoard={() => { setResultOpen(false); setBoardOpen(true); }} />}
+      {resultOpen && level && <ResultCard level={level} play={play} streak={streak} onClose={() => setResultOpen(false)} onBoard={() => { setResultOpen(false); setBoardOpen(true); }} />}
       {boardOpen && <Leaderboard puzzleNumber={level?.number ?? 1} onClose={() => setBoardOpen(false)} />}
     </>
   );
@@ -295,8 +315,8 @@ function Countdown() {
   return <b>{pad(Math.floor(s / 3600))}:{pad(Math.floor((s % 3600) / 60))}:{pad(s % 60)}</b>;
 }
 
-function ResultCard({ level, play, onClose, onBoard }: { level: Level; play: Play; onClose: () => void; onBoard: () => void }) {
-  const text = shareText({ number: level.number, shots: play.shots, score: play.score, helpers: play.helpers });
+function ResultCard({ level, play, streak, onClose, onBoard }: { level: Level; play: Play; streak: Streak; onClose: () => void; onBoard: () => void }) {
+  const text = shareText({ number: level.number, shots: play.shots, score: play.score, helpers: play.helpers, streak: streak.current });
   const [copied, setCopied] = useState('Copy result');
   const shareRef = useRef<HTMLDivElement>(null);
   const [rank, setRank] = useState<{ day: number | null; all: number | null; players: number } | null>(null);
@@ -316,10 +336,10 @@ function ResultCard({ level, play, onClose, onBoard }: { level: Level; play: Pla
     <div className="overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className={`card ${won ? 'win' : ''}`} role="dialog" aria-labelledby="resTitle">
         <h2 id="resTitle">{won ? 'Beacon lit' : 'Beacon dark'}</h2>
-        {won ? <div className="big">{play.score}<small>pts</small></div> : <p>All three shots missed. The game still counts on the leaderboard, and a new puzzle unlocks at midnight UTC.</p>}
+        {won ? <div className="big">{play.score}<small>pts</small></div> : <p>All three shots missed, so your streak resets. The game still counts on the leaderboard, and a new puzzle unlocks at midnight UTC.</p>}
         <div className="facts">
           <span><b>{play.shots.length}/{MAX_SHOTS}</b>shots</span>
-          <span><b>{play.helpers.length}</b>helpers</span>
+          <span><b>{streak.current}</b>day streak</span>
           <span><b>{rank?.day ? `#${rank.day}` : '–'}</b>today{rank ? ` of ${rank.players}` : ''}</span>
           <span><b>{rank?.all ? `#${rank.all}` : '–'}</b>all time</span>
         </div>

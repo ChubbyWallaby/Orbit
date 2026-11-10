@@ -1,14 +1,21 @@
 // Server-side game service. All score-affecting decisions happen here.
 import { constrainMoon, trace, SATELLITE_RADIUS, type Level, type Placement, type Vec } from '@/game/engine';
-import { levelFor } from '@/game/generate';
+import { generateLevel, type Generated } from '@/game/generate';
 import { HELPERS, MAX_SHOTS, scoreFor, utcDay, type HelperId } from '@/game/rules';
-import { getStore, type Play } from './store';
+import { getStore, type Play, type Streak } from './store';
+
+/** Today's UTC day. Outside production, ORBIT_DAY=YYYY-MM-DD lets you play any day for testing. */
+export function currentDay(): string {
+  const o = process.env.ORBIT_DAY;
+  if (o && process.env.VERCEL_ENV !== 'production' && /^\d{4}-\d{2}-\d{2}$/.test(o)) return o;
+  return utcDay();
+}
 
 export class GameError extends Error {
   constructor(message: string, public status = 400) { super(message); }
 }
 
-export type Me = { name: string | null; play: Play };
+export type Me = { name: string | null; play: Play; streak: Streak };
 export type TodayPayload = { level: Level; me: Me; ghost: GhostHint | null };
 export type GhostHint = { x: number; z: number; radius: number };
 
@@ -20,8 +27,29 @@ export function cleanName(raw: unknown): string {
   return name;
 }
 
-export function ghostFor(day: string): GhostHint {
-  const { solution } = levelFor(day);
+// Each day's level is generated once, then cached in memory and in the store (generation can take seconds).
+const memo = new Map<string, Promise<Generated>>();
+export function levelFor(day: string): Promise<Generated> {
+  let g = memo.get(day);
+  if (!g) {
+    g = (async () => {
+      const store = getStore();
+      const key = `level:v3:${day}`;
+      const hit = await store.getCached(key);
+      if (hit) return JSON.parse(hit) as Generated;
+      const fresh = generateLevel(day);
+      await store.setCached(key, JSON.stringify(fresh), 60 * 60 * 24 * 30);
+      return fresh;
+    })();
+    g.catch(() => memo.delete(day));
+    memo.set(day, g);
+    if (memo.size > 8) memo.delete(memo.keys().next().value as string);
+  }
+  return g;
+}
+
+export async function ghostFor(day: string): Promise<GhostHint> {
+  const { solution } = await levelFor(day);
   // offset the circle's centre a little (deterministically) so it marks an area, not the exact spot
   let h = 0;
   for (const c of day) h = (h * 31 + c.charCodeAt(0)) >>> 0;
@@ -30,12 +58,13 @@ export function ghostFor(day: string): GhostHint {
   return { x: solution.moon.x + Math.cos(a) * d, z: solution.moon.z + Math.sin(a) * d, radius: 3 };
 }
 
-export async function today(pid: string | null, day = utcDay()): Promise<TodayPayload> {
-  const { level } = levelFor(day);
+export async function today(pid: string | null, day = currentDay()): Promise<TodayPayload> {
+  const { level } = await levelFor(day);
   const store = getStore();
   const play: Play = pid ? await store.getPlay(day, pid) : { shots: [], helpers: [], status: 'playing', score: 0 };
   const name = pid ? await store.getName(pid) : null;
-  return { level, me: { name, play }, ghost: play.helpers.includes('ghost') ? ghostFor(day) : null };
+  const streak = pid ? await store.getStreak(pid, day) : { current: 0, best: 0 };
+  return { level, me: { name, play, streak }, ghost: play.helpers.includes('ghost') ? await ghostFor(day) : null };
 }
 
 export async function setName(pid: string, raw: unknown) {
@@ -51,14 +80,14 @@ async function requirePlayer(pid: string | null) {
   return pid;
 }
 
-export async function applyHelper(pidIn: string | null, helper: unknown, day = utcDay()) {
+export async function applyHelper(pidIn: string | null, helper: unknown, day = currentDay()) {
   const pid = await requirePlayer(pidIn);
   if (typeof helper !== 'string' || !(helper in HELPERS)) throw new GameError('Unknown helper.');
   const store = getStore();
   const play = await store.getPlay(day, pid);
   if (play.status !== 'playing') throw new GameError("Today's puzzle is already finished.", 409);
   const helpers = await store.addHelper(day, pid, helper as HelperId);
-  return { helpers, ghost: helpers.includes('ghost') ? ghostFor(day) : null };
+  return { helpers, ghost: helpers.includes('ghost') ? await ghostFor(day) : null };
 }
 
 const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
@@ -86,10 +115,10 @@ export function parsePlacement(level: Level, raw: unknown, helpers: HelperId[]):
   return { moon, angle, satellite };
 }
 
-export async function shoot(pidIn: string | null, raw: unknown, day = utcDay()) {
+export async function shoot(pidIn: string | null, raw: unknown, day = currentDay()) {
   const pid = await requirePlayer(pidIn);
   const store = getStore();
-  const { level } = levelFor(day);
+  const { level } = await levelFor(day);
   const play = await store.getPlay(day, pid);
   if (play.status !== 'playing') throw new GameError("Today's puzzle is already finished.", 409);
   const placement = parsePlacement(level, raw, play.helpers);
@@ -107,10 +136,10 @@ export async function shoot(pidIn: string | null, raw: unknown, day = utcDay()) 
     status = 'lost';
     await store.finish(day, pid, 'lost', 0);
   }
-  return { shot, result: res.result, bounces: res.bounces, hitName: res.hitName, score, status, play: await store.getPlay(day, pid) };
+  return { shot, result: res.result, bounces: res.bounces, hitName: res.hitName, score, status, play: await store.getPlay(day, pid), streak: await store.getStreak(pid, day) };
 }
 
-export async function leaderboard(pid: string | null, scope: unknown, day = utcDay()) {
+export async function leaderboard(pid: string | null, scope: unknown, day = currentDay()) {
   const s = scope === 'all' ? 'all' : 'day';
   return { scope: s, day, ...(await getStore().board(s, day, pid)) };
 }

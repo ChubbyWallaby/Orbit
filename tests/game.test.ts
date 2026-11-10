@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { trace } from '@/game/engine';
-import { generateLevel, levelFor } from '@/game/generate';
+import { trace, type Level } from '@/game/engine';
+import { generateLevel, featureFor, FALLBACK_LEVEL } from '@/game/generate';
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
-import { MemoryStore, setStoreForTests } from '@/server/store';
-import { cleanName, ghostFor, leaderboard, setName, shoot, today, applyHelper, GameError } from '@/server/game';
+import { MemoryStore, setStoreForTests, nextStreak, liveStreak } from '@/server/store';
+import { cleanName, parsePlacement, ghostFor, leaderboard, levelFor, setName, shoot, today, applyHelper, GameError } from '@/server/game';
 
 const DAY = '2026-11-10';
 
@@ -26,27 +26,87 @@ describe('rules', () => {
 });
 
 describe('generator', () => {
-  test('is deterministic and solvable across many days', () => {
+  test('is deterministic, varied and solvable across many days', async () => {
+    setStoreForTests(new MemoryStore());
     expect(JSON.stringify(generateLevel(DAY))).toBe(JSON.stringify(generateLevel(DAY)));
+    const kinds = new Set<string>();
     for (let i = 0; i < 40; i++) {
       const day = new Date(Date.UTC(2026, 10, 10 + i)).toISOString().slice(0, 10);
-      const g = levelFor(day);
+      await new Promise((r) => setTimeout(r, 0)); // let the test runner breathe between heavy generations
+      const g = await levelFor(day);
+      kinds.add(featureFor(day));
       const start = trace(g.level, { moon: g.level.moon.start, angle: g.level.moon.startAngle });
+      // the starting spot and the solution must both be accepted by the server
+      expect(() => parsePlacement(g.level, { moon: g.level.moon.start, angle: g.level.moon.startAngle }, []), day).not.toThrow();
+      expect(() => parsePlacement(g.level, g.solution, []), day).not.toThrow();
       expect(start.result, day).not.toBe('hit');
       const sol = trace(g.level, g.solution);
       expect(sol.result, day).toBe('hit');
       expect(sol.bounces, day).toBeGreaterThan(0);
-      const gh = ghostFor(day);
+      const gh = await ghostFor(day);
       expect(Math.hypot(gh.x - g.solution.moon.x, gh.z - g.solution.moon.z)).toBeLessThan(gh.radius);
     }
-  }, 120000);
+    expect([...kinds].sort()).toEqual(['blackhole', 'plain', 'splitter', 'wormhole']);
+  }, 240000);
+});
+
+describe('pieces', () => {
+  // a bare level: beam fires along +x from (-20, 0) toward a beacon at (20, 0)
+  const bare = (extra: Partial<Level>): Level => ({
+    ...FALLBACK_LEVEL(DAY), emitter: { x: -20, z: 0, dir: 0 }, target: { x: 20, z: 0, r: 1.5 }, bodies: [], rocks: [], splitters: [], wormholes: [], ...extra,
+  });
+  const farMoon = { moon: { x: -25, z: 20 }, angle: 0 };
+
+  test('black holes swallow light', () => {
+    const res = trace(bare({ bodies: [{ x: 0, z: 0.5, r: 0.9, m: 1.5, name: 'Nyx', kind: 'blackhole' }] }), farMoon);
+    expect(res).toMatchObject({ result: 'absorbed', hitName: 'Nyx' });
+  });
+
+  test('splitters create a second, reflected beam', () => {
+    // normal at 135° turns the reflected copy towards +z; a beacon there is lit by the copy
+    const level = bare({ target: { x: 0, z: 15, r: 1.5 }, splitters: [{ x: 0, z: 0, angle: 135, half: 1.3 }] });
+    const res = trace(level, farMoon);
+    expect(res.rays.length).toBe(2);
+    expect(res.result).toBe('hit');
+    expect(res.rays[1].start).toBeGreaterThan(15);
+  });
+
+  test('wormholes carry light to the other mouth', () => {
+    const level = bare({ target: { x: 10, z: 12, r: 1.5 }, wormholes: [{ a: { x: -5, z: 0 }, b: { x: -5, z: 12 }, r: 1.1 }] });
+    const res = trace(level, farMoon);
+    expect(res.result).toBe('hit');
+    expect(res.rays[0].pts.some((p) => p.jump)).toBe(true);
+  });
+});
+
+describe('streaks', () => {
+  test('consecutive wins build a streak, a loss or a skipped day resets it', () => {
+    let row = nextStreak(null, '2026-11-10', true);
+    row = nextStreak(row, '2026-11-11', true);
+    expect(row).toEqual({ current: 2, best: 2, last: '2026-11-11' });
+    expect(liveStreak(row, '2026-11-12')).toEqual({ current: 2, best: 2 });
+    expect(liveStreak(row, '2026-11-13')).toEqual({ current: 0, best: 2 });
+    row = nextStreak(row, '2026-11-12', false);
+    expect(row.current).toBe(0);
+    row = nextStreak(row, '2026-11-14', true);
+    expect(row).toEqual({ current: 1, best: 2, last: '2026-11-14' });
+  });
 });
 
 describe('server game', () => {
   let store: MemoryStore;
-  beforeEach(() => { store = new MemoryStore(); setStoreForTests(store); });
-  const sol = () => levelFor(DAY).solution;
-  const miss = () => ({ moon: levelFor(DAY).level.moon.start, angle: levelFor(DAY).level.moon.startAngle });
+  beforeEach(async () => {
+    store = new MemoryStore(); setStoreForTests(store);
+    const g = await levelFor(DAY);
+    sol = () => g.solution;
+    miss = () => ({ moon: g.level.moon.start, angle: g.level.moon.startAngle });
+    sol2 = (await levelFor('2026-11-11')).solution;
+    giant = g.level.bodies[0];
+  });
+  let sol: () => import('@/game/engine').Placement;
+  let miss: () => import('@/game/engine').Placement;
+  let sol2: import('@/game/engine').Placement;
+  let giant: { x: number; z: number };
 
   test('names are validated', () => {
     expect(cleanName('  Nova   Pilot ')).toBe('Nova Pilot');
@@ -88,8 +148,7 @@ describe('server game', () => {
 
   test('rejects impossible placements', async () => {
     await setName('d', 'Di');
-    const g = levelFor(DAY).level.bodies[0];
-    await expect(shoot('d', { moon: { x: g.x, z: g.z }, angle: 0 }, DAY)).rejects.toThrow('cannot sit');
+    await expect(shoot('d', { moon: { x: giant.x, z: giant.z }, angle: 0 }, DAY)).rejects.toThrow('cannot sit');
     await expect(shoot('d', { moon: { x: 'a' }, angle: 0 }, DAY)).rejects.toThrow('Invalid shot');
   });
 
@@ -98,14 +157,16 @@ describe('server game', () => {
     await setName('a', 'Ana'); await setName('b', 'Bo'); await setName('c', 'Cy');
     await shoot('a', sol(), DAY); // 1000
     await shoot('b', miss(), DAY); await shoot('b', sol(), DAY); // 700
-    await shoot('c', levelFor(day2).solution, day2); // 1000 on day 2
-    await shoot('b', levelFor(day2).solution, day2); // b total 1700
+    await shoot('c', sol2, day2); // 1000 on day 2
+    await shoot('b', sol2, day2); // b total 1700
     const all = await leaderboard('c', 'all', day2);
     // equal scores share a rank; order within a tie follows Redis (reverse member order)
     expect(all.top.map((e) => [e.rank, e.name, e.score, e.games]).sort()).toEqual([
       [1, 'Bo', 1700, 2], [2, 'Ana', 1000, 1], [2, 'Cy', 1000, 1],
     ]);
     expect(all.me).toMatchObject({ name: 'Cy', rank: 2, you: true });
+    expect(all.top.find((e) => e.name === 'Bo')).toMatchObject({ best: 2 });
+    expect((await today('b', day2)).me.streak).toEqual({ current: 2, best: 2 });
     const d1 = await leaderboard(null, 'day', DAY);
     expect(d1.top.map((e) => e.name)).toEqual(['Ana', 'Bo']);
     expect(d1.me).toBeNull();
