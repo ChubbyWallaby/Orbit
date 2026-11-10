@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { trace, type Level } from '@/game/engine';
-import { generateLevel, featureFor, FALLBACK_LEVEL } from '@/game/generate';
+import { previewLimit, trace, type Level } from '@/game/engine';
+import { generateLevel, featureFor, FALLBACK_LEVEL, VARIETY_FROM } from '@/game/generate';
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
 import { MemoryStore, setStoreForTests, nextStreak, liveStreak } from '@/server/store';
 import { cleanName, parsePlacement, ghostFor, leaderboard, levelFor, setName, shoot, today, applyHelper, GameError } from '@/server/game';
@@ -50,6 +50,33 @@ describe('generator', () => {
   }, 240000);
 });
 
+describe('board variety', () => {
+  test('days before the variety launch keep their exact level', () => {
+    const g = generateLevel(DAY);
+    expect(DAY < VARIETY_FROM).toBe(true);
+    expect(g.level.emitter.style).toBeUndefined();
+    expect(g.level.moon).toMatchObject({ r: 1.6, m: 0.12 });
+    expect(g.level.mirrorHalf).toBe(1.5);
+  });
+  test('later days vary planets, gravity, stations, moons, mirrors and sides', () => {
+    const seen = { giant: new Set<string>(), emitter: new Set<string>(), moon: new Set<string>(), side: new Set<string>(), mirror: new Set<string>() };
+    for (let i = 1; i <= 15; i++) {
+      const { level } = generateLevel(new Date(Date.UTC(2026, 10, 10 + i)).toISOString().slice(0, 10));
+      const giant = level.bodies.find((b) => b.kind === 'giant')!;
+      seen.giant.add(String(giant.style));
+      seen.emitter.add(String(level.emitter.style));
+      seen.moon.add(String(level.moon.style));
+      seen.side.add(level.emitter.x < 0 ? 'left' : 'right');
+      seen.mirror.add(level.mirrorHalf < 1.35 ? 'small' : level.mirrorHalf > 1.65 ? 'wide' : 'normal');
+    }
+    expect(seen.giant.size).toBeGreaterThanOrEqual(4);
+    expect(seen.emitter.size).toBe(3);
+    expect(seen.moon.size).toBe(3);
+    expect(seen.side.size).toBe(2);
+    expect(seen.mirror.size).toBe(3);
+  }, 120000);
+});
+
 describe('pieces', () => {
   // a bare level: beam fires along +x from (-20, 0) toward a beacon at (20, 0)
   const bare = (extra: Partial<Level>): Level => ({
@@ -76,6 +103,16 @@ describe('pieces', () => {
     const res = trace(level, farMoon);
     expect(res.result).toBe('hit');
     expect(res.rays[0].pts.some((p) => p.jump)).toBe(true);
+  });
+});
+
+describe('aiming line', () => {
+  test('the scanner shows only 20% more of the aiming line', () => {
+    const g = generateLevel(DAY);
+    const res = trace(g.level, g.solution);
+    const normal = previewLimit(res, false);
+    expect(normal).toBeLessThanOrEqual(15);
+    expect(previewLimit(res, true)).toBeCloseTo(normal * 1.2);
   });
 });
 

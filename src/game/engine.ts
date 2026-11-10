@@ -3,7 +3,7 @@
 
 export type Vec = { x: number; z: number };
 export type BodyKind = 'giant' | 'planet' | 'blackhole';
-export type Body = Vec & { r: number; m: number; name: string; kind: BodyKind };
+export type Body = Vec & { r: number; m: number; name: string; kind: BodyKind; style?: string; ring?: boolean };
 export type Rock = Vec & { r: number };
 /** A crystal that lets light through and also reflects a copy. angle = normal direction in degrees. */
 export type Splitter = Vec & { angle: number; half: number };
@@ -13,13 +13,13 @@ export type Wormhole = { a: Vec; b: Vec; r: number };
 export type Level = {
   day: string; // UTC date, YYYY-MM-DD
   number: number; // puzzle number since launch
-  emitter: Vec & { dir: number }; // dir in radians
+  emitter: Vec & { dir: number; style?: string }; // dir in radians
   target: Vec & { r: number };
   bodies: Body[];
   rocks: Rock[];
   splitters: Splitter[];
   wormholes: Wormhole[];
-  moon: { r: number; m: number; name: string; start: Vec; startAngle: number };
+  moon: { r: number; m: number; name: string; start: Vec; startAngle: number; style?: string };
   mirrorHalf: number;
   bounds: { x: number; z: number };
 };
@@ -256,18 +256,17 @@ export function constrainMoon(level: Level, pos: Vec, radius = level.moon.r): Ve
   return { x, z };
 }
 
+/** The scanner helper shows this much more of the aiming line. */
+export const SCANNER_BOOST = 1.2;
+
 /** How far (in light-travel distance from the emitter) the dashed aiming line reaches. */
-export function previewLimit(res: TraceResult, longRange: boolean): number {
+export function previewLimit(res: TraceResult, scanner: boolean): number {
+  // normally: 15 units, or just past the first mirror bounce if that comes sooner
   const main = res.rays[0];
-  let limit = longRange ? 46 : 15;
-  let seen = 0;
-  for (let i = 1; i < main.pts.length; i++) {
-    if (!main.pts[i].bounce) continue;
-    seen++;
-    if (!longRange && seen === 1) limit = Math.min(limit, main.dist[i] + 4.5);
-    if (longRange && seen === 2) limit = Math.min(limit, main.dist[i] + 8);
-  }
-  return limit;
+  let limit = 15;
+  const firstBounce = main.pts.findIndex((p, i) => i > 0 && p.bounce);
+  if (firstBounce > 0) limit = Math.min(limit, main.dist[firstBounce] + 4.5);
+  return scanner ? limit * SCANNER_BOOST : limit;
 }
 
 /** Index of the last point of `ray` within light-travel distance `d` (-1 if the ray starts later). */

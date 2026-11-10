@@ -92,7 +92,69 @@ function buildCandidate(day: string, attempt: number, feature: Feature): Level {
   // the new piece may sit near the moon's starting spot: move the moon clear of it
   const moved = constrainMoon(level, level.moon.start);
   level.moon.start = { x: round(moved.x), z: round(moved.z) };
+  if (day >= VARIETY_FROM) addVariety(level, rng(hash(`${day}#style#${attempt}`)));
   return level;
+}
+
+/** Days from this date on get varied planets, gravity, stations, moons, mirrors and board orientation. */
+export const VARIETY_FROM = '2026-11-11';
+
+const GIANT_STYLES = ['amber', 'ice', 'lava', 'toxic', 'violet'] as const;
+const PLANET_STYLES = ['blue', 'rose', 'jade', 'sand'] as const;
+const EMITTER_STYLES = ['station', 'dish', 'crystal'] as const;
+const MOON_STYLES = ['grey', 'ice', 'rust'] as const;
+
+/**
+ * Re-skins and re-tunes a finished candidate. Uses its own random stream so the main layout
+ * draws stay the same, and only runs for days from VARIETY_FROM (earlier days must not change).
+ */
+function addVariety(level: Level, r: () => number) {
+  const between = (a: number, b: number) => a + (b - a) * r();
+  const pick = <T,>(arr: readonly T[]) => arr[Math.floor(r() * arr.length)];
+
+  // giant: look, rings and gravity class
+  const giant = level.bodies.find((b) => b.kind === 'giant')!;
+  giant.style = pick(GIANT_STYLES);
+  giant.ring = r() < 0.6;
+  const cls = r();
+  const others: (Vec & { r: number })[] = [
+    { ...level.emitter, r: 1.5 }, { ...level.target, r: level.target.r }, ...level.rocks,
+    ...level.bodies.filter((b) => b !== giant), ...level.splitters.map((sp) => ({ ...sp, r: sp.half })),
+    ...level.wormholes.flatMap((w) => [{ ...w.a, r: w.r }, { ...w.b, r: w.r }]),
+  ];
+  const fits = (rad: number) => others.every((o) => dist(o, giant) > o.r + rad + 1.5);
+  if (cls < 0.3) { giant.r = round(between(2.8, 3.4)); giant.m = round(between(1.0, 1.3)); } // dense: small, strong pull
+  else if (cls > 0.7) {
+    const rad = round(between(4.8, 5.6));
+    if (fits(rad)) { giant.r = rad; giant.m = round(between(0.45, 0.68)); } // puffy: big, weak pull
+  }
+  for (const b of level.bodies) if (b.kind === 'planet') b.style = pick(PLANET_STYLES);
+
+  // moon and mirror
+  level.moon.style = pick(MOON_STYLES);
+  level.moon.r = round(between(1.25, 1.95));
+  level.moon.m = round(between(0.06, 0.22), 3);
+  level.mirrorHalf = round(between(1.1, 1.9));
+  level.emitter.style = pick(EMITTER_STYLES);
+
+  // board orientation: mirror and/or flip, so the laser comes from different sides
+  const fx = r() < 0.5 ? -1 : 1, fz = r() < 0.5 ? -1 : 1;
+  const t = (v: Vec) => { v.x = round(v.x * fx); v.z = round(v.z * fz); };
+  const tAngleDeg = (a: number) => {
+    const rad = Math.atan2(Math.sin((a * Math.PI) / 180) * fz, Math.cos((a * Math.PI) / 180) * fx);
+    return Math.round(((rad * 180) / Math.PI + 360) % 360);
+  };
+  t(level.emitter);
+  level.emitter.dir = round(Math.atan2(Math.sin(level.emitter.dir) * fz, Math.cos(level.emitter.dir) * fx), 4);
+  t(level.target);
+  level.bodies.forEach(t);
+  level.rocks.forEach(t);
+  for (const sp of level.splitters) { t(sp); sp.angle = tAngleDeg(sp.angle); }
+  for (const w of level.wormholes) { t(w.a); t(w.b); }
+  t(level.moon.start);
+  level.moon.startAngle = tAngleDeg(level.moon.startAngle);
+  const c = constrainMoon(level, level.moon.start);
+  level.moon.start = { x: round(c.x), z: round(c.z) };
 }
 
 /** Places today's special piece on or near the unaided beam so it actually matters. */

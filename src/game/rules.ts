@@ -8,7 +8,7 @@ export const LAUNCH_DAY = '2026-11-10';
 export type HelperId = 'scanner' | 'ghost' | 'satellite';
 
 export const HELPERS: Record<HelperId, { name: string; cost: number; blurb: string }> = {
-  scanner: { name: 'Long-range scanner', cost: 150, blurb: 'Shows the beam much further, past a second bounce.' },
+  scanner: { name: 'Long-range scanner', cost: 150, blurb: 'Shows 20% more of the aiming line.' },
   satellite: { name: 'Mirror satellite', cost: 200, blurb: 'Adds a free-floating mirror you can place and turn.' },
   ghost: { name: 'Ghost moon', cost: 300, blurb: 'Marks the area where the moon solves the puzzle.' },
 };

@@ -30,6 +30,18 @@ function loadPlacement(level: Level): Placement {
 
 const START_TEXT = 'Drag the moon into the beam. Turn its mirror. Light the beacon.';
 
+/** A short description of today's board, e.g. "Ice giant · strong gravity · small mirror". */
+function conditions(level: Level): string | null {
+  const giant = level.bodies.find((b) => b.kind === 'giant');
+  if (!giant?.style) return null; // levels from before board variety
+  const names: Record<string, string> = { amber: 'Gas giant', ice: 'Ice giant', lava: 'Lava world', toxic: 'Toxic giant', violet: 'Violet giant' };
+  const gravity = giant.m >= 1 ? 'strong gravity' : giant.m < 0.7 ? 'weak gravity' : 'normal gravity';
+  const parts = [names[giant.style] ?? 'Giant', gravity];
+  if (level.mirrorHalf < 1.35) parts.push('small mirror');
+  else if (level.mirrorHalf > 1.65) parts.push('wide mirror');
+  return parts.join(' · ');
+}
+
 /** What is special about today's level, if anything. */
 function todaysPiece(level: Level): { label: string; intro: string } | null {
   const bh = level.bodies.find((b) => b.kind === 'blackhole');
@@ -56,11 +68,16 @@ export default function Game() {
   const [helpersOpen, setHelpersOpen] = useState(false);
   const [confirming, setConfirming] = useState<HelperId | null>(null);
   const [busy, setBusy] = useState(false);
+  // after the daily game ends, players can keep firing locally; these shots never reach the server
+  const [practice, setPractice] = useState(false);
+  // the placement the beam on screen was fired from; moving anything clears that beam
+  const beamFor = useRef<Placement | null>(null);
   const [status, setStatus] = useState<Status>({ text: START_TEXT });
   const pendingFire = useRef(false);
 
   const level = data?.level ?? null;
   const finished = play.status !== 'playing';
+  const canAim = !finished || practice;
   const helpers = play.helpers;
 
   // create the 3D scene once
@@ -114,14 +131,20 @@ export default function Game() {
     const s = sceneRef.current;
     if (!s || !level || !placement || !preview) return;
     s.setPlacement(placement);
-    s.locked = finished || busy;
+    s.locked = !canAim || busy;
     s.setWon(play.status === 'won');
     if (!busy) {
-      if (finished) { s.setPreview(null, 0); s.showBeam(preview); }
-      else { s.setPreview(preview, previewLimit(preview, helpers.includes('scanner'))); }
+      if (!canAim) {
+        // daily game over: show where the final shot went
+        s.setPreview(null, 0); s.showBeam(preview);
+      } else {
+        if (beamFor.current !== placement) { s.clearBeam(); beamFor.current = null; }
+        // while the last shot's beam is on screen it shows the path; otherwise show the aiming line
+        s.setPreview(beamFor.current ? null : preview, previewLimit(preview, helpers.includes('scanner')));
+      }
     }
     try { localStorage.setItem(placementKey(level.day), JSON.stringify(placement)); } catch { /* ignore */ }
-  }, [sceneReady, level, placement, preview, helpers, finished, busy, play.status]);
+  }, [sceneReady, level, placement, preview, helpers, canAim, busy, play.status]);
 
   useEffect(() => { sceneRef.current?.setGhost(ghost); }, [sceneReady, ghost]);
 
@@ -135,6 +158,7 @@ export default function Game() {
     try {
       const res = await api<{ result: TraceResult['result']; hitName: string | null; score: number; status: Play['status']; play: Play; streak: Streak }>('/api/shot', { placement });
       if (s && preview) await s.fire(preview);
+      beamFor.current = placement;
       setPlay(res.play);
       setStreak(res.streak);
       const left = MAX_SHOTS - res.play.shots.length;
@@ -158,6 +182,34 @@ export default function Game() {
       setBusy(false);
     }
   }, [level, placement, busy, finished, name, preview]);
+
+  // practice shots are traced locally with the same physics and never sent to the server
+  const practiceFire = async () => {
+    if (!level || !placement || !preview || busy) return;
+    setBusy(true);
+    setStatus({ text: 'Practice beam away…' });
+    const s = sceneRef.current;
+    s?.setPreview(null, 0); s?.clearBeam();
+    if (s) await s.fire(preview);
+    beamFor.current = placement;
+    if (preview.result === 'hit') setStatus({ text: 'Practice: beacon lit! This one doesn’t count.', kind: 'good' });
+    else if (preview.result === 'absorbed') setStatus({ text: `Practice: pulled into ${preview.hitName}.`, kind: 'bad' });
+    else if (preview.result === 'rock') setStatus({ text: 'Practice: blocked by the asteroid belt.', kind: 'bad' });
+    else setStatus({ text: 'Practice: lost in deep space.', kind: 'bad' });
+    setBusy(false);
+  };
+
+  const startPractice = () => {
+    setResultOpen(false);
+    setPractice(true);
+    setStatus({ text: 'Practice mode: fire as often as you like. These shots don’t count toward the leaderboard.' });
+  };
+
+  const resetMoon = () => {
+    if (!level || !placement) return;
+    setPlacement({ moon: { ...level.moon.start }, angle: level.moon.startAngle, satellite: placement.satellite ? { ...placement.satellite } : null });
+    if (!practice) setStatus({ text: START_TEXT });
+  };
 
   const applyHelper = async (id: HelperId) => {
     if (!level || !placement || finished || helpers.includes(id)) return;
@@ -190,6 +242,7 @@ export default function Game() {
         <div className="brand">
           <h1 className="wordmark">ORB<span>I</span>T</h1>
           {level && todaysPiece(level) && <div className="meta piece">{todaysPiece(level)!.label}</div>}
+          {level && conditions(level) && <div className="meta">{conditions(level)}</div>}
           <div className="meta">{level ? `Daily #${level.number} · ${new Date(level.day + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })}` : 'Loading today’s puzzle…'}</div>
         </div>
         <div className="right">
@@ -229,28 +282,36 @@ export default function Game() {
           <div className="console">
             <div className="dial">
               <label htmlFor="mirror">Moon mirror</label>
-              <input type="range" id="mirror" min={0} max={359} value={placement.angle} disabled={finished || busy}
+              <input type="range" id="mirror" min={0} max={359} value={placement.angle} disabled={!canAim || busy}
                 onChange={(e) => setPlacement({ ...placement, angle: +e.target.value })} />
               <output htmlFor="mirror">{placement.angle}°</output>
             </div>
             {placement.satellite && (
               <div className="dial">
                 <label htmlFor="sat">Satellite</label>
-                <input type="range" id="sat" min={0} max={359} value={placement.satellite.angle} disabled={finished || busy}
+                <input type="range" id="sat" min={0} max={359} value={placement.satellite.angle} disabled={!canAim || busy}
                   onChange={(e) => setPlacement({ ...placement, satellite: { ...placement.satellite!, angle: +e.target.value } })} />
                 <output htmlFor="sat">{placement.satellite.angle}°</output>
               </div>
             )}
             <div className="row">
-              {finished ? (
+              {finished && practice ? (
+                <>
+                  <div className="potential"><b>Practice</b> · shots don’t count. Today: {play.status === 'won' ? `${play.score} pts` : 'no points'}</div>
+                  <button className="btn" disabled={busy} onClick={resetMoon}>Reset moon</button>
+                  <button className="btn" disabled={busy} onClick={() => setResultOpen(true)}>Your result</button>
+                  <button className="btn fire" disabled={busy} onClick={practiceFire}>Practice shot</button>
+                </>
+              ) : finished ? (
                 <>
                   <div className="potential">{play.status === 'won' ? <>Today: <b>{play.score} pts</b></> : 'No points today.'} Next puzzle in <Countdown /></div>
-                  <button className="btn primary" onClick={() => setResultOpen(true)}>Your result</button>
+                  <button className="btn" onClick={() => setResultOpen(true)}>Your result</button>
+                  <button className="btn primary" onClick={startPractice}>Keep practising</button>
                 </>
               ) : (
                 <>
                   <div className="potential">A hit now scores <b>{nextScore} pts</b>{helpers.length ? ` (helpers −${helpers.reduce((s, h) => s + HELPERS[h].cost, 0)})` : ''}</div>
-                  <button className="btn" disabled={busy} onClick={() => { setPlacement({ moon: { ...level.moon.start }, angle: level.moon.startAngle, satellite: placement.satellite ? { ...placement.satellite } : null }); setStatus({ text: START_TEXT }); }}>Reset moon</button>
+                  <button className="btn" disabled={busy} onClick={resetMoon}>Reset moon</button>
                   <button className="btn fire" disabled={busy} onClick={fire}>Fire</button>
                 </>
               )}
@@ -266,7 +327,7 @@ export default function Game() {
           onSkip={() => { setNameOpen(false); pendingFire.current = false; }}
         />
       )}
-      {resultOpen && level && <ResultCard level={level} play={play} streak={streak} onClose={() => setResultOpen(false)} onBoard={() => { setResultOpen(false); setBoardOpen(true); }} />}
+      {resultOpen && level && <ResultCard level={level} play={play} streak={streak} practice={practice} onPractice={startPractice} onClose={() => setResultOpen(false)} onBoard={() => { setResultOpen(false); setBoardOpen(true); }} />}
       {boardOpen && <Leaderboard puzzleNumber={level?.number ?? 1} onClose={() => setBoardOpen(false)} />}
     </>
   );
@@ -315,7 +376,7 @@ function Countdown() {
   return <b>{pad(Math.floor(s / 3600))}:{pad(Math.floor((s % 3600) / 60))}:{pad(s % 60)}</b>;
 }
 
-function ResultCard({ level, play, streak, onClose, onBoard }: { level: Level; play: Play; streak: Streak; onClose: () => void; onBoard: () => void }) {
+function ResultCard({ level, play, streak, practice, onPractice, onClose, onBoard }: { level: Level; play: Play; streak: Streak; practice: boolean; onPractice: () => void; onClose: () => void; onBoard: () => void }) {
   const text = shareText({ number: level.number, shots: play.shots, score: play.score, helpers: play.helpers, streak: streak.current });
   const [copied, setCopied] = useState('Copy result');
   const shareRef = useRef<HTMLDivElement>(null);
@@ -348,6 +409,7 @@ function ResultCard({ level, play, streak, onClose, onBoard }: { level: Level; p
           <button className="btn primary" onClick={copy}>{copied}</button>
           <button className="btn" onClick={onBoard}>Leaderboard</button>
         </div>
+        {!practice && <button className="btn" onClick={onPractice}>Keep practising (doesn’t count)</button>}
         <p>Next puzzle in <Countdown /></p>
       </div>
     </div>

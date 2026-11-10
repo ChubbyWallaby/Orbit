@@ -23,26 +23,41 @@ const hdr = (c: number, k: number) => new THREE.Color(c).multiplyScalar(k);
 type Drag = 'moon' | 'satellite';
 export type SceneCallbacks = { onDrag: (which: Drag, pos: Vec) => void };
 
-function planetMaterial(kind: 'giant' | 'planet', seed: number) {
-  const palette = kind === 'giant'
-    ? ['vec3(0.93,0.78,0.55)', 'vec3(0.62,0.27,0.12)', 'vec3(0.82,0.52,0.22)', 'vec3(0.32,0.14,0.08)']
-    : ['vec3(0.62,0.80,0.92)', 'vec3(0.18,0.32,0.55)', 'vec3(0.40,0.60,0.78)', 'vec3(0.08,0.12,0.25)'];
+/** Colour palettes (light band, dark band, accent, poles) and self-glow for each planet style. */
+const PALETTES: Record<string, { c: [string, string, string, string]; halo: [number, number, number]; glow: number }> = {
+  amber: { c: ['vec3(0.93,0.78,0.55)', 'vec3(0.62,0.27,0.12)', 'vec3(0.82,0.52,0.22)', 'vec3(0.32,0.14,0.08)'], halo: [1, 0.55, 0.25], glow: 0 },
+  ice: { c: ['vec3(0.80,0.94,0.98)', 'vec3(0.22,0.50,0.66)', 'vec3(0.50,0.80,0.88)', 'vec3(0.10,0.22,0.34)'], halo: [0.5, 0.85, 1], glow: 0 },
+  lava: { c: ['vec3(1.00,0.52,0.16)', 'vec3(0.18,0.05,0.04)', 'vec3(0.85,0.22,0.05)', 'vec3(0.08,0.02,0.02)'], halo: [1, 0.35, 0.12], glow: 0.55 },
+  toxic: { c: ['vec3(0.86,0.95,0.45)', 'vec3(0.25,0.42,0.10)', 'vec3(0.60,0.80,0.22)', 'vec3(0.10,0.18,0.05)'], halo: [0.7, 1, 0.35], glow: 0.08 },
+  violet: { c: ['vec3(0.88,0.75,0.98)', 'vec3(0.36,0.18,0.58)', 'vec3(0.62,0.42,0.86)', 'vec3(0.14,0.06,0.25)'], halo: [0.75, 0.5, 1], glow: 0 },
+  blue: { c: ['vec3(0.62,0.80,0.92)', 'vec3(0.18,0.32,0.55)', 'vec3(0.40,0.60,0.78)', 'vec3(0.08,0.12,0.25)'], halo: [0.4, 0.7, 1], glow: 0 },
+  rose: { c: ['vec3(0.98,0.78,0.80)', 'vec3(0.62,0.25,0.34)', 'vec3(0.86,0.50,0.58)', 'vec3(0.25,0.08,0.12)'], halo: [1, 0.55, 0.65], glow: 0 },
+  jade: { c: ['vec3(0.70,0.95,0.84)', 'vec3(0.12,0.42,0.34)', 'vec3(0.38,0.74,0.60)', 'vec3(0.05,0.18,0.15)'], halo: [0.45, 1, 0.8], glow: 0 },
+  sand: { c: ['vec3(0.95,0.88,0.70)', 'vec3(0.60,0.48,0.30)', 'vec3(0.82,0.70,0.48)', 'vec3(0.30,0.24,0.14)'], halo: [1, 0.85, 0.6], glow: 0 },
+};
+
+function planetMaterial(style: string, seed: number) {
+  const pal = PALETTES[style] ?? PALETTES.amber;
+  const [light, dark, accent, poles] = pal.c;
   return new THREE.ShaderMaterial({
-    uniforms: { uSun: { value: SUN }, uT: { value: 0 }, uSeed: { value: seed } },
+    uniforms: { uSun: { value: SUN }, uT: { value: 0 }, uSeed: { value: seed }, uGlow: { value: pal.glow } },
     vertexShader: `varying vec3 vN; varying vec3 vP; varying vec3 vW;
       void main(){ vP = position; vN = normalize(mat3(modelMatrix)*normal); vec4 w = modelMatrix*vec4(position,1.); vW = w.xyz; gl_Position = projectionMatrix*viewMatrix*w; }`,
-    fragmentShader: NOISE + `uniform vec3 uSun; uniform float uT; uniform float uSeed; varying vec3 vN; varying vec3 vP; varying vec3 vW;
+    fragmentShader: NOISE + `uniform vec3 uSun; uniform float uT; uniform float uSeed; uniform float uGlow; varying vec3 vN; varying vec3 vP; varying vec3 vW;
       void main(){
         vec3 p = normalize(vP); float lat = p.y;
         float warp = fbm(vec3(p.x*3.0 + uT*0.03 + uSeed, p.y*9.0, p.z*3.0)) * 0.9;
         float b = sin(lat*(18.0+uSeed*0.4) + warp*4.0) * 0.5 + 0.5;
         float b2 = sin(lat*57.0 + warp*7.0) * 0.5 + 0.5;
-        vec3 c = mix(${palette[1]}, ${palette[0]}, b); c = mix(c, ${palette[2]}, b2*0.45);
-        c = mix(c, ${palette[3]}, smoothstep(0.75,1.0,abs(lat))*0.6);
+        vec3 c = mix(${dark}, ${light}, b); c = mix(c, ${accent}, b2*0.45);
+        c = mix(c, ${poles}, smoothstep(0.75,1.0,abs(lat))*0.6);
         float diff = clamp(dot(vN, uSun), 0.0, 1.0);
         vec3 V = normalize(cameraPosition - vW);
         float rim = pow(1.0 - clamp(dot(vN, V),0.,1.), 3.0);
-        gl_FragColor = vec4(c*(0.05+0.82*diff) + ${palette[0]}*rim*0.22*(0.3+diff), 1.0);
+        // molten cracks glow on the night side of lava worlds
+        float cracks = smoothstep(0.62, 0.7, fbm(p*6.0 + uSeed)) * uGlow;
+        vec3 col = c*(0.05+0.82*diff) + ${light}*rim*0.22*(0.3+diff) + vec3(1.0,0.4,0.1)*cracks*(1.2-diff);
+        gl_FragColor = vec4(col, 1.0);
       }`,
   });
 }
@@ -111,10 +126,10 @@ export class OrbitScene {
   private animated: { tick: (t: number, dt: number) => void }[] = [];
   private moon = new THREE.Group();
   private moonMirror = new THREE.Group();
-  private moonPick!: THREE.Mesh;
+  private moonPick = new THREE.Mesh();
   private sat = new THREE.Group();
   private satMirror = new THREE.Group();
-  private satPick!: THREE.Mesh;
+  private satPick = new THREE.Mesh();
   private ghost: THREE.Mesh;
   private grid!: THREE.LineSegments;
   private gridPos!: Float32Array;
@@ -165,8 +180,9 @@ export class OrbitScene {
     this.ghost.rotation.x = -Math.PI / 2; this.ghost.visible = false;
     this.scene.add(this.flash, this.ghost, this.preview, this.beams);
 
-    this.buildMoon();
-    this.buildSatellite();
+    this.moon.visible = false;
+    this.scene.add(this.moon, this.sat);
+    this.sat.visible = false;
 
     const el = this.renderer.domElement;
     el.style.touchAction = 'none';
@@ -229,30 +245,67 @@ export class OrbitScene {
     this.scene.add(new THREE.Points(g, new THREE.PointsMaterial({ size: 3.2, map: new THREE.CanvasTexture(sc), vertexColors: true, sizeAttenuation: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })));
   }
 
-  private buildMoon() {
+  private buildMoon(level: Level) {
+    this.moon.clear();
+    this.moonMirror = new THREE.Group();
+    const r = level.moon.r;
+    const tint = { grey: 0xffffff, ice: 0xcfe6ff, rust: 0xe08a62 }[level.moon.style ?? 'grey'] ?? 0xffffff;
     const tex = craterTexture();
-    const ball = new THREE.Mesh(new THREE.SphereGeometry(1.6, 64, 48), new THREE.MeshStandardMaterial({ map: tex, bumpMap: tex, bumpScale: 0.04, roughness: 0.95 }));
-    const grab = new THREE.Mesh(new THREE.TorusGeometry(2.5, 0.035, 8, 96), new THREE.MeshBasicMaterial({ color: hdr(MIRROR, 1.4), transparent: true, opacity: 0.55, toneMapped: false }));
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(r, 64, 48), new THREE.MeshStandardMaterial({ map: tex, bumpMap: tex, bumpScale: 0.04, roughness: level.moon.style === 'ice' ? 0.6 : 0.95, color: tint }));
+    const grab = new THREE.Mesh(new THREE.TorusGeometry(r + 0.9, 0.035, 8, 96), new THREE.MeshBasicMaterial({ color: hdr(MIRROR, 1.4), transparent: true, opacity: 0.55, toneMapped: false }));
     grab.rotation.x = Math.PI / 2;
-    this.moonPick = new THREE.Mesh(new THREE.SphereGeometry(3, 16, 12), new THREE.MeshBasicMaterial({ visible: false }));
-    const panel = mirrorPanel(3); panel.position.x = 1.6 + MOON_MIRROR_OFFSET;
+    this.moonPick = new THREE.Mesh(new THREE.SphereGeometry(r + 1.4, 16, 12), new THREE.MeshBasicMaterial({ visible: false }));
+    const panel = mirrorPanel(level.mirrorHalf * 2); panel.position.x = r + MOON_MIRROR_OFFSET;
     this.moonMirror.add(panel);
     this.moon.add(ball, grab, this.moonPick, this.moonMirror);
-    this.scene.add(this.moon);
     this.animated.push({ tick: (t, dt) => { ball.rotation.y += dt * 0.12; (grab.material as THREE.MeshBasicMaterial).opacity = this.locked ? 0.12 : 0.35 + Math.sin(t * 2.4) * 0.2; } });
   }
 
-  private buildSatellite() {
+  private buildSatellite(level: Level) {
+    this.sat.clear();
+    this.satMirror = new THREE.Group();
     const body = new THREE.Mesh(new THREE.OctahedronGeometry(SATELLITE_RADIUS * 0.6, 0), new THREE.MeshStandardMaterial({ color: 0xc8d0e0, metalness: 0.8, roughness: 0.3, flatShading: true }));
     body.position.x = -0.45;
-    const grab = new THREE.Mesh(new THREE.TorusGeometry(1.9, 0.03, 8, 80), new THREE.MeshBasicMaterial({ color: hdr(MIRROR, 1.4), transparent: true, opacity: 0.5, toneMapped: false }));
+    const grab = new THREE.Mesh(new THREE.TorusGeometry(level.mirrorHalf + 0.4, 0.03, 8, 80), new THREE.MeshBasicMaterial({ color: hdr(MIRROR, 1.4), transparent: true, opacity: 0.5, toneMapped: false }));
     grab.rotation.x = Math.PI / 2;
-    this.satPick = new THREE.Mesh(new THREE.SphereGeometry(2.2, 16, 12), new THREE.MeshBasicMaterial({ visible: false }));
-    this.satMirror.add(mirrorPanel(3), body);
+    this.satPick = new THREE.Mesh(new THREE.SphereGeometry(level.mirrorHalf + 0.7, 16, 12), new THREE.MeshBasicMaterial({ visible: false }));
+    this.satMirror.add(mirrorPanel(level.mirrorHalf * 2), body);
     this.sat.add(this.satMirror, grab, this.satPick);
-    this.sat.visible = false;
-    this.scene.add(this.sat);
     this.animated.push({ tick: (t) => { (grab.material as THREE.MeshBasicMaterial).opacity = this.locked ? 0.1 : 0.3 + Math.sin(t * 2.4 + 1) * 0.2; } });
+  }
+
+  private buildEmitter(level: Level) {
+    const em = new THREE.Group(); em.position.set(level.emitter.x, 0, level.emitter.z); em.rotation.y = -level.emitter.dir;
+    const metal = new THREE.MeshStandardMaterial({ color: 0xb8bfcc, metalness: 0.85, roughness: 0.35 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x2a2f3c, metalness: 0.6, roughness: 0.5 });
+    const style = level.emitter.style ?? 'station';
+    if (style === 'dish') {
+      // radio-telescope style dish on a truss, facing along the beam
+      const dish = new THREE.Mesh(new THREE.SphereGeometry(1.5, 32, 16, 0, Math.PI * 2, 0, 0.9), new THREE.MeshStandardMaterial({ color: 0xdfe3ea, metalness: 0.5, roughness: 0.35, side: THREE.DoubleSide }));
+      dish.rotation.z = Math.PI / 2; dish.position.x = -0.9;
+      const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.3, 6), metal); mast.rotation.z = Math.PI / 2; mast.position.x = 0.15;
+      const base = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.5, 0.8), dark); base.position.set(-1.2, -0.9, 0);
+      em.add(dish, mast, base);
+    } else if (style === 'crystal') {
+      // alien crystal emitter: floating shard inside spinning rings
+      const shard = new THREE.Mesh(new THREE.OctahedronGeometry(0.8, 0), new THREE.MeshPhysicalMaterial({ color: 0xffc2d1, metalness: 0.1, roughness: 0.1, emissive: 0x8a1830, emissiveIntensity: 0.8, flatShading: true }));
+      shard.scale.set(1.5, 0.8, 0.8); shard.position.x = -0.3;
+      const ringA = new THREE.Mesh(new THREE.TorusGeometry(1.2, 0.04, 8, 64), new THREE.MeshBasicMaterial({ color: hdr(0xff8aa5, 1.6), toneMapped: false }));
+      const ringB = ringA.clone(); ringB.scale.setScalar(0.8);
+      em.add(shard, ringA, ringB);
+      this.animated.push({ tick: (t) => { ringA.rotation.x = t * 0.8; ringA.rotation.y = t * 0.5; ringB.rotation.y = -t; ringB.rotation.z = t * 0.6; shard.rotation.x = t * 0.4; } });
+    } else {
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.7, 1.8, 24), metal); body.rotation.z = Math.PI / 2;
+      const hub = new THREE.Mesh(new THREE.TorusGeometry(1.15, 0.12, 12, 48), dark); hub.rotation.y = Math.PI / 2;
+      em.add(body, hub);
+      for (const s of [-1, 1]) {
+        const panel = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.04, 2.4), new THREE.MeshStandardMaterial({ color: 0x1b2a55, metalness: 0.4, roughness: 0.3, emissive: 0x0b1840, emissiveIntensity: 0.6 }));
+        panel.position.set(-0.3, 0, s * 2.4); em.add(panel);
+      }
+    }
+    const lens = new THREE.Mesh(new THREE.SphereGeometry(0.32, 20, 16), new THREE.MeshBasicMaterial({ color: hdr(0xff4f6e, 3), toneMapped: false })); lens.position.x = 1;
+    em.add(lens);
+    return em;
   }
 
   private buildBlackHole(grp: THREE.Group, r: number) {
@@ -283,16 +336,22 @@ export class OrbitScene {
   setLevel(level: Level) {
     this.level = level;
     this.levelGroup.clear();
-    this.animated = this.animated.slice(0, 2); // keep moon + satellite animators
+    this.animated = [];
+    this.buildMoon(level);
+    this.buildSatellite(level);
+    this.moon.visible = true;
+    this.moonPos = { x: NaN, z: NaN }; // force the next setPlacement to refresh the grid
     const g = this.levelGroup;
 
     level.bodies.forEach((b, i) => {
       const grp = new THREE.Group(); grp.position.set(b.x, 0, b.z);
       if (b.kind === 'blackhole') { this.buildBlackHole(grp, b.r); g.add(grp); return; }
-      const mat = planetMaterial(b.kind === 'giant' ? 'giant' : 'planet', i * 3.7 + b.r);
+      const style = b.style ?? (b.kind === 'giant' ? 'amber' : 'blue');
+      const mat = planetMaterial(style, i * 3.7 + b.r);
       const ball = new THREE.Mesh(new THREE.SphereGeometry(b.r, 96, 64), mat); ball.rotation.z = 0.12;
-      grp.add(ball, new THREE.Mesh(new THREE.SphereGeometry(b.r * 1.12, 64, 48), haloMaterial(b.kind === 'giant' ? new THREE.Color(1, 0.55, 0.25) : new THREE.Color(0.4, 0.7, 1))));
-      if (b.kind === 'giant') {
+      const halo = (PALETTES[style] ?? PALETTES.amber).halo;
+      grp.add(ball, new THREE.Mesh(new THREE.SphereGeometry(b.r * 1.12, 64, 48), haloMaterial(new THREE.Color(...halo))));
+      if (b.kind === 'giant' && b.ring !== false) {
         const ring = new THREE.Mesh(new THREE.RingGeometry(b.r * 1.3, b.r * 2.15, 160, 1), new THREE.ShaderMaterial({
           transparent: true, side: THREE.DoubleSide, depthWrite: false,
           uniforms: { uIn: { value: b.r * 1.3 }, uOut: { value: b.r * 2.15 } },
@@ -311,17 +370,7 @@ export class OrbitScene {
     });
 
     // emitter
-    const em = new THREE.Group(); em.position.set(level.emitter.x, 0, level.emitter.z); em.rotation.y = -level.emitter.dir;
-    const metal = new THREE.MeshStandardMaterial({ color: 0xb8bfcc, metalness: 0.85, roughness: 0.35 });
-    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.7, 1.8, 24), metal); body.rotation.z = Math.PI / 2;
-    const hub = new THREE.Mesh(new THREE.TorusGeometry(1.15, 0.12, 12, 48), new THREE.MeshStandardMaterial({ color: 0x2a2f3c, metalness: 0.6, roughness: 0.5 })); hub.rotation.y = Math.PI / 2;
-    em.add(body, hub);
-    for (const s of [-1, 1]) {
-      const panel = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.04, 2.4), new THREE.MeshStandardMaterial({ color: 0x1b2a55, metalness: 0.4, roughness: 0.3, emissive: 0x0b1840, emissiveIntensity: 0.6 }));
-      panel.position.set(-0.3, 0, s * 2.4); em.add(panel);
-    }
-    const lens = new THREE.Mesh(new THREE.SphereGeometry(0.32, 20, 16), new THREE.MeshBasicMaterial({ color: hdr(0xff4f6e, 3), toneMapped: false })); lens.position.x = 1;
-    em.add(lens); g.add(em);
+    g.add(this.buildEmitter(level));
 
     // beacon
     const bc = new THREE.Group(); bc.position.set(level.target.x, 0, level.target.z);
