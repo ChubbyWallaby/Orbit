@@ -30,6 +30,18 @@ function loadPlacement(level: Level): Placement {
 
 const START_TEXT = 'Drag the moon into the beam. Turn its mirror. Light the beacon.';
 
+/** A short description of today's board, e.g. "Ice giant · strong gravity · small mirror". */
+function conditions(level: Level): string | null {
+  const giant = level.bodies.find((b) => b.kind === 'giant');
+  if (!giant?.style) return null; // levels from before board variety
+  const names: Record<string, string> = { amber: 'Gas giant', ice: 'Ice giant', lava: 'Lava world', toxic: 'Toxic giant', violet: 'Violet giant' };
+  const gravity = giant.m >= 1 ? 'strong gravity' : giant.m < 0.7 ? 'weak gravity' : 'normal gravity';
+  const parts = [names[giant.style] ?? 'Giant', gravity];
+  if (level.mirrorHalf < 1.35) parts.push('small mirror');
+  else if (level.mirrorHalf > 1.65) parts.push('wide mirror');
+  return parts.join(' · ');
+}
+
 /** What is special about today's level, if anything. */
 function todaysPiece(level: Level): { label: string; intro: string } | null {
   const bh = level.bodies.find((b) => b.kind === 'blackhole');
@@ -230,6 +242,7 @@ export default function Game() {
         <div className="brand">
           <h1 className="wordmark">ORB<span>I</span>T</h1>
           {level && todaysPiece(level) && <div className="meta piece">{todaysPiece(level)!.label}</div>}
+          {level && conditions(level) && <div className="meta">{conditions(level)}</div>}
           <div className="meta">{level ? `Daily #${level.number} · ${new Date(level.day + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })}` : 'Loading today’s puzzle…'}</div>
         </div>
         <div className="right">

@@ -3,7 +3,7 @@
 
 export type Vec = { x: number; z: number };
 export type BodyKind = 'giant' | 'planet' | 'blackhole';
-export type Body = Vec & { r: number; m: number; name: string; kind: BodyKind };
+export type Body = Vec & { r: number; m: number; name: string; kind: BodyKind; style?: string; ring?: boolean };
 export type Rock = Vec & { r: number };
 /** A crystal that lets light through and also reflects a copy. angle = normal direction in degrees. */
 export type Splitter = Vec & { angle: number; half: number };
@@ -13,13 +13,13 @@ export type Wormhole = { a: Vec; b: Vec; r: number };
 export type Level = {
   day: string; // UTC date, YYYY-MM-DD
   number: number; // puzzle number since launch
-  emitter: Vec & { dir: number }; // dir in radians
+  emitter: Vec & { dir: number; style?: string }; // dir in radians
   target: Vec & { r: number };
   bodies: Body[];
   rocks: Rock[];
   splitters: Splitter[];
   wormholes: Wormhole[];
-  moon: { r: number; m: number; name: string; start: Vec; startAngle: number };
+  moon: { r: number; m: number; name: string; start: Vec; startAngle: number; style?: string };
   mirrorHalf: number;
   bounds: { x: number; z: number };
 };
