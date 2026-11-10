@@ -2,7 +2,7 @@
 import { constrainMoon, trace, SATELLITE_RADIUS, type Level, type Placement, type Vec } from '@/game/engine';
 import { generateLevel, type Generated } from '@/game/generate';
 import { HELPERS, MAX_SHOTS, scoreFor, utcDay, type HelperId } from '@/game/rules';
-import { getStore, type Play, type Streak } from './store';
+import { getStore, nameKey, type Play, type Streak } from './store';
 
 /** Today's UTC day. Outside production, ORBIT_DAY=YYYY-MM-DD lets you play any day for testing. */
 export function currentDay(): string {
@@ -69,7 +69,12 @@ export async function today(pid: string | null, day = currentDay()): Promise<Tod
 
 export async function setName(pid: string, raw: unknown) {
   const name = cleanName(raw);
-  await getStore().setName(pid, name);
+  const store = getStore();
+  // one pilot per name, so the leaderboard never shows the same name twice
+  if (!(await store.claimName(pid, name))) throw new GameError('That pilot name is already taken. Pick another one.', 409);
+  const old = await store.getName(pid);
+  await store.setName(pid, name);
+  if (old && nameKey(old) !== nameKey(name)) await store.releaseName(pid, old);
   return name;
 }
 

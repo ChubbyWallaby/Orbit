@@ -12,6 +12,10 @@ export type Streak = { current: number; best: number };
 export interface Store {
   getName(pid: string): Promise<string | null>;
   setName(pid: string, name: string): Promise<void>;
+  /** Reserves `name` (case-insensitive) for `pid`. False if another player already has it. */
+  claimName(pid: string, name: string): Promise<boolean>;
+  /** Frees `name` if `pid` holds it. */
+  releaseName(pid: string, name: string): Promise<void>;
   getPlay(day: string, pid: string): Promise<Play>;
   addHelper(day: string, pid: string, helper: HelperId): Promise<HelperId[]>;
   /** Atomically reserves the next shot. Returns the 1-based shot number. */
@@ -24,6 +28,8 @@ export interface Store {
   getCached(key: string): Promise<string | null>;
   setCached(key: string, value: string, ttlSeconds: number): Promise<void>;
 }
+
+export const nameKey = (name: string) => name.normalize('NFKC').toLowerCase();
 
 export function prevDay(day: string): string {
   return new Date(Date.parse(day + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10);
@@ -45,17 +51,21 @@ export function liveStreak(row: StreakRow | null, day: string): Streak {
 }
 
 const DAY_TTL = 60 * 60 * 24 * 90;
+// Preview deployments share the production database, so they keep their data under their own
+// prefix: testing a preview link never adds players or scores to the live leaderboard.
+const NS = process.env.VERCEL_ENV === 'preview' ? 'orbit-preview' : 'orbit';
 const k = {
-  name: (pid: string) => `orbit:player:${pid}:name`,
-  play: (day: string, pid: string) => `orbit:play:${day}:${pid}`,
-  shots: (day: string, pid: string) => `orbit:shots:${day}:${pid}`,
-  done: (day: string, pid: string) => `orbit:done:${day}:${pid}`,
-  dayBoard: (day: string) => `orbit:lb:day:${day}`,
-  allBoard: 'orbit:lb:all',
-  games: 'orbit:lb:games',
-  best: 'orbit:lb:best',
-  streak: (pid: string) => `orbit:player:${pid}:streak`,
-  cache: (key: string) => `orbit:cache:${key}`,
+  name: (pid: string) => `${NS}:player:${pid}:name`,
+  play: (day: string, pid: string) => `${NS}:play:${day}:${pid}`,
+  shots: (day: string, pid: string) => `${NS}:shots:${day}:${pid}`,
+  done: (day: string, pid: string) => `${NS}:done:${day}:${pid}`,
+  dayBoard: (day: string) => `${NS}:lb:day:${day}`,
+  allBoard: `${NS}:lb:all`,
+  games: `${NS}:lb:games`,
+  best: `${NS}:lb:best`,
+  streak: (pid: string) => `${NS}:player:${pid}:streak`,
+  names: `${NS}:names`,
+  cache: (key: string) => `${NS}:cache:${key}`,
 };
 
 class RedisStore implements Store {
@@ -65,6 +75,15 @@ class RedisStore implements Store {
   }
   async setName(pid: string, name: string) {
     await this.r.set(k.name(pid), name);
+  }
+  async claimName(pid: string, name: string) {
+    const key = nameKey(name);
+    await this.r.hsetnx(k.names, key, pid);
+    return (await this.r.hget<string>(k.names, key)) === pid;
+  }
+  async releaseName(pid: string, name: string) {
+    const key = nameKey(name);
+    if ((await this.r.hget<string>(k.names, key)) === pid) await this.r.hdel(k.names, key);
   }
   async getPlay(day: string, pid: string): Promise<Play> {
     const h = await this.r.hgetall<Record<string, unknown>>(k.play(day, pid));
@@ -181,6 +200,16 @@ export class MemoryStore implements Store {
   async setCached(key: string, value: string) { this.cache.set(key, value); }
   async getName(pid: string) { return this.names.get(pid) ?? null; }
   async setName(pid: string, name: string) { this.names.set(pid, name); }
+  claimed = new Map<string, string>();
+  async claimName(pid: string, name: string) {
+    const key = nameKey(name);
+    if (!this.claimed.has(key)) this.claimed.set(key, pid);
+    return this.claimed.get(key) === pid;
+  }
+  async releaseName(pid: string, name: string) {
+    const key = nameKey(name);
+    if (this.claimed.get(key) === pid) this.claimed.delete(key);
+  }
   private play(day: string, pid: string) {
     const key = `${day}:${pid}`;
     let p = this.plays.get(key);

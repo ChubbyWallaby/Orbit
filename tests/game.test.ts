@@ -151,6 +151,14 @@ describe('server game', () => {
     expect(() => cleanName('<script>')).toThrow(GameError);
   });
 
+  test('pilot names are unique, ignoring case, and renaming frees the old name', async () => {
+    await setName('a', 'Nova');
+    await expect(setName('b', 'nova')).rejects.toThrow('already taken');
+    expect(await setName('a', 'NOVA')).toBe('NOVA'); // the same player may change case
+    await setName('a', 'Vega');
+    expect(await setName('b', 'Nova')).toBe('Nova');
+  });
+
   test('requires a name before shooting', async () => {
     await expect(shoot('a', sol(), DAY)).rejects.toThrow('Pick a pilot name');
   });
