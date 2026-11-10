@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import { IBM_Plex_Mono, IBM_Plex_Sans, Syne } from 'next/font/google';
+import { Analytics } from '@vercel/analytics/next';
 import './globals.css';
 
 const display = Syne({ subsets: ['latin'], weight: ['600', '800'], variable: '--font-display' });
@@ -15,7 +16,10 @@ export const viewport: Viewport = { themeColor: '#05060c', viewportFit: 'cover',
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${display.variable} ${body.variable} ${mono.variable}`}>
-      <body>{children}</body>
+      <body>
+        {children}
+        <Analytics />
+      </body>
     </html>
   );
 }
