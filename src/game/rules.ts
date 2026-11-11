@@ -5,14 +5,17 @@ export const SHOT_BASE = [1000, 700, 400] as const;
 export const MIN_WIN_SCORE = 50;
 export const LAUNCH_DAY = '2026-11-10';
 
-export type HelperId = 'scanner' | 'ghost' | 'satellite';
+/** 'ghost' (Ghost moon) is retired: kept only so plays that already used it still score correctly. */
+export type HelperId = 'scanner' | 'satellite' | 'energized' | 'ghost';
 
 export const HELPERS: Record<HelperId, { name: string; cost: number; blurb: string }> = {
   scanner: { name: 'Long-range scanner', cost: 150, blurb: 'Shows 20% more of the aiming line.' },
   satellite: { name: 'Mirror satellite', cost: 200, blurb: 'Adds a free-floating mirror you can place and turn.' },
-  ghost: { name: 'Ghost moon', cost: 300, blurb: 'Marks the area where the moon solves the puzzle.' },
+  energized: { name: 'Energized laser', cost: 200, blurb: 'Asteroids your beam hits explode and stay gone for your next shots.' },
+  ghost: { name: 'Ghost moon', cost: 300, blurb: 'Retired.' },
 };
-export const HELPER_ORDER: HelperId[] = ['scanner', 'satellite', 'ghost'];
+/** Helpers players can pick today, in display order. */
+export const HELPER_ORDER: HelperId[] = ['scanner', 'satellite', 'energized'];
 
 export function isHelperId(x: unknown): x is HelperId {
   return typeof x === 'string' && x in HELPERS;
@@ -41,7 +44,7 @@ export function msUntilNextPuzzle(now = new Date()): number {
 
 export function shareText(opts: { number: number; shots: string[]; score: number; helpers: HelperId[]; streak?: number }): string {
   const squares = opts.shots.map((r) => (r === 'hit' ? '🟩' : '🟥')).join('') + '⬛'.repeat(MAX_SHOTS - opts.shots.length);
-  const helperIcons = opts.helpers.map((h) => ({ scanner: '📡', satellite: '🛰️', ghost: '👻' })[h]).join('');
+  const helperIcons = opts.helpers.map((h) => ({ scanner: '📡', satellite: '🛰️', energized: '💥', ghost: '👻' })[h]).join('');
   const won = opts.shots.includes('hit');
   return [
     `ORBIT #${opts.number} 🪐`,

@@ -4,7 +4,8 @@
 export type Vec = { x: number; z: number };
 export type BodyKind = 'giant' | 'planet' | 'blackhole';
 export type Body = Vec & { r: number; m: number; name: string; kind: BodyKind; style?: string; ring?: boolean };
-export type Rock = Vec & { r: number };
+/** `id` is the rock's index in the original level, kept when destroyed rocks are removed. */
+export type Rock = Vec & { r: number; id?: number };
 /** A crystal that lets light through and also reflects a copy. angle = normal direction in degrees. */
 export type Splitter = Vec & { angle: number; half: number };
 /** Light entering one mouth leaves the other with the same direction. */
@@ -43,12 +44,16 @@ export type Ray = {
   result: Outcome;
   hitName: string | null;
   bounces: number;
+  /** id of the asteroid that stopped this ray, if any */
+  rockId?: number;
 };
 export type TraceResult = {
   rays: Ray[];
   result: Outcome;
   bounces: number;
   hitName: string | null;
+  /** ids of every asteroid hit by any ray */
+  rocksHit: number[];
 };
 
 export const MOON_MIRROR_OFFSET = 0.12;
@@ -112,6 +117,7 @@ export function trace(level: Level, placement: Placement, maxSteps = 3600): Trac
     let result: Outcome = 'lost';
     let hitName: string | null = null;
     let bounces = 0;
+    let rockId: number | undefined;
     // the object last interacted with is ignored for a few steps so a ray cannot re-trigger it
     let ignore: string | null = job.ignore;
     let ignoreUntil = job.ignore ? 4 : -1;
@@ -208,9 +214,11 @@ export function trace(level: Level, placement: Placement, maxSteps = 3600): Trac
         }
       }
       if (!dead) {
-        for (const R of level.rocks) {
+        for (let ri = 0; ri < level.rocks.length; ri++) {
+          const R = level.rocks[ri];
           if (Math.hypot(p.x - R.x, p.z - R.z) < R.r) {
             result = 'rock';
+            rockId = R.id ?? ri;
             dead = true;
             break;
           }
@@ -222,12 +230,19 @@ export function trace(level: Level, placement: Placement, maxSteps = 3600): Trac
       }
       if (Math.abs(p.x) > level.bounds.x + 6 || Math.abs(p.z) > level.bounds.z + 6) break;
     }
-    rays.push({ pts, start: job.start, dist, result, hitName, bounces });
+    rays.push({ pts, start: job.start, dist, result, hitName, bounces, rockId });
   }
 
   const winner = rays.find((r) => r.result === 'hit');
   const main = winner ?? rays[0];
-  return { rays, result: main.result, bounces: main.bounces, hitName: main.hitName };
+  const rocksHit = [...new Set(rays.flatMap((r) => (r.rockId === undefined ? [] : [r.rockId])))];
+  return { rays, result: main.result, bounces: main.bounces, hitName: main.hitName, rocksHit };
+}
+
+/** The level as one player sees it: asteroids they destroyed with the energized laser are gone. */
+export function withDestroyed(level: Level, destroyed: readonly number[]): Level {
+  if (!destroyed.length) return level;
+  return { ...level, rocks: level.rocks.map((r, i) => ({ ...r, id: r.id ?? i })).filter((r) => !destroyed.includes(r.id)) };
 }
 
 /** Keeps a draggable object inside the board and out of fixed objects. Used by client and server. */

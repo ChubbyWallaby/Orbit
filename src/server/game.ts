@@ -1,7 +1,7 @@
 // Server-side game service. All score-affecting decisions happen here.
-import { constrainMoon, trace, SATELLITE_RADIUS, type Level, type Placement, type Vec } from '@/game/engine';
+import { constrainMoon, trace, withDestroyed, SATELLITE_RADIUS, type Level, type Placement, type Vec } from '@/game/engine';
 import { generateLevel, type Generated } from '@/game/generate';
-import { HELPERS, MAX_SHOTS, scoreFor, utcDay, type HelperId } from '@/game/rules';
+import { HELPER_ORDER, MAX_SHOTS, scoreFor, utcDay, type HelperId } from '@/game/rules';
 import { getStore, nameKey, type Play, type Streak } from './store';
 
 /** Today's UTC day. Outside production, ORBIT_DAY=YYYY-MM-DD lets you play any day for testing. */
@@ -16,8 +16,7 @@ export class GameError extends Error {
 }
 
 export type Me = { name: string | null; play: Play; streak: Streak };
-export type TodayPayload = { level: Level; me: Me; ghost: GhostHint | null };
-export type GhostHint = { x: number; z: number; radius: number };
+export type TodayPayload = { level: Level; me: Me };
 
 export function cleanName(raw: unknown): string {
   if (typeof raw !== 'string') throw new GameError('Enter a pilot name.');
@@ -48,23 +47,13 @@ export function levelFor(day: string): Promise<Generated> {
   return g;
 }
 
-export async function ghostFor(day: string): Promise<GhostHint> {
-  const { solution } = await levelFor(day);
-  // offset the circle's centre a little (deterministically) so it marks an area, not the exact spot
-  let h = 0;
-  for (const c of day) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  const a = (h % 360) * (Math.PI / 180);
-  const d = 0.6 + ((h >> 9) % 100) / 100;
-  return { x: solution.moon.x + Math.cos(a) * d, z: solution.moon.z + Math.sin(a) * d, radius: 3 };
-}
-
 export async function today(pid: string | null, day = currentDay()): Promise<TodayPayload> {
   const { level } = await levelFor(day);
   const store = getStore();
-  const play: Play = pid ? await store.getPlay(day, pid) : { shots: [], helpers: [], status: 'playing', score: 0 };
+  const play: Play = pid ? await store.getPlay(day, pid) : { shots: [], helpers: [], status: 'playing', score: 0, destroyed: [] };
   const name = pid ? await store.getName(pid) : null;
   const streak = pid ? await store.getStreak(pid, day) : { current: 0, best: 0 };
-  return { level, me: { name, play, streak }, ghost: play.helpers.includes('ghost') ? await ghostFor(day) : null };
+  return { level, me: { name, play, streak } };
 }
 
 export async function setName(pid: string, raw: unknown) {
@@ -87,12 +76,13 @@ async function requirePlayer(pid: string | null) {
 
 export async function applyHelper(pidIn: string | null, helper: unknown, day = currentDay()) {
   const pid = await requirePlayer(pidIn);
-  if (typeof helper !== 'string' || !(helper in HELPERS)) throw new GameError('Unknown helper.');
+  // only helpers on offer today can be picked (the retired Ghost moon is refused)
+  if (typeof helper !== 'string' || !(HELPER_ORDER as string[]).includes(helper)) throw new GameError('Unknown helper.');
   const store = getStore();
   const play = await store.getPlay(day, pid);
   if (play.status !== 'playing') throw new GameError("Today's puzzle is already finished.", 409);
   const helpers = await store.addHelper(day, pid, helper as HelperId);
-  return { helpers, ghost: helpers.includes('ghost') ? await ghostFor(day) : null };
+  return { helpers };
 }
 
 const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
@@ -129,8 +119,11 @@ export async function shoot(pidIn: string | null, raw: unknown, day = currentDay
   const placement = parsePlacement(level, raw, play.helpers);
   const shot = await store.reserveShot(day, pid);
   if (shot > MAX_SHOTS) throw new GameError('No shots left today.', 409);
-  const res = trace(level, placement);
+  const res = trace(withDestroyed(level, play.destroyed), placement);
   await store.recordShot(day, pid, shot, res.result);
+  // the energized laser blows up every asteroid the beam hits; they stay gone for later shots
+  const destroyed = play.helpers.includes('energized') ? res.rocksHit : [];
+  if (destroyed.length) await store.addDestroyed(day, pid, destroyed);
   let score = 0;
   let status: Play['status'] = 'playing';
   if (res.result === 'hit') {
@@ -141,7 +134,7 @@ export async function shoot(pidIn: string | null, raw: unknown, day = currentDay
     status = 'lost';
     await store.finish(day, pid, 'lost', 0);
   }
-  return { shot, result: res.result, bounces: res.bounces, hitName: res.hitName, score, status, play: await store.getPlay(day, pid), streak: await store.getStreak(pid, day) };
+  return { shot, result: res.result, bounces: res.bounces, hitName: res.hitName, destroyed, score, status, play: await store.getPlay(day, pid), streak: await store.getStreak(pid, day) };
 }
 
 export async function leaderboard(pid: string | null, scope: unknown, day = currentDay()) {

@@ -5,7 +5,7 @@ A daily 3D space puzzle. A station fires a laser that bends around planets. Drag
 ## How scoring works
 
 - A hit on shot 1, 2 or 3 scores 1,000, 700 or 400 points.
-- Helpers cost points if you win: Long-range scanner −150, Mirror satellite −200, Ghost moon −300 (minimum win score 50).
+- Helpers cost points if you win: Long-range scanner −150 (shows 20% more of the aiming line), Mirror satellite −200 (an extra mirror you place), Energized laser −200 (asteroids the beam hits explode and stay gone for your later shots). Minimum win score 50.
 - Missing all three shots scores 0, and the game still counts.
 - Streak: consecutive days with the beacon lit. A miss or a skipped day resets it. The leaderboard shows each pilot's best streak.
 
