@@ -311,6 +311,45 @@ export class OrbitScene {
     return em;
   }
 
+  /** A star: boiling surface, wide corona, and a light that brightens nearby planets. */
+  private buildSun(grp: THREE.Group, r: number) {
+    const surface = new THREE.ShaderMaterial({
+      uniforms: { uT: { value: 0 } },
+      vertexShader: `varying vec3 vP; varying vec3 vN; varying vec3 vW; void main(){ vP = position; vN = normalize(mat3(modelMatrix)*normal); vec4 w = modelMatrix*vec4(position,1.); vW = w.xyz; gl_Position = projectionMatrix*viewMatrix*w; }`,
+      fragmentShader: NOISE + `uniform float uT; varying vec3 vP; varying vec3 vN; varying vec3 vW; void main(){
+        vec3 p = normalize(vP);
+        float n = fbm(p*4.0 + vec3(uT*0.15, uT*0.1, 0.0)); float n2 = fbm(p*11.0 - vec3(0.0, uT*0.2, uT*0.1));
+        vec3 c = mix(vec3(1.0,0.45,0.08), vec3(1.0,0.86,0.45), n) + vec3(1.0,0.95,0.7)*smoothstep(0.55,0.8,n2)*0.6;
+        float rim = pow(1.0 - clamp(dot(vN, normalize(cameraPosition - vW)), 0., 1.), 2.0);
+        gl_FragColor = vec4(c * (1.6 + rim*1.2), 1.0); }`,
+      toneMapped: false,
+    });
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(r, 96, 64), surface);
+    const corona = new THREE.Mesh(new THREE.SphereGeometry(r * 1.9, 64, 48), new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.BackSide,
+      vertexShader: `varying vec3 vN; varying vec3 vW; void main(){ vN = normalize(mat3(modelMatrix)*normal); vec4 w = modelMatrix*vec4(position,1.); vW=w.xyz; gl_Position = projectionMatrix*viewMatrix*w; }`,
+      fragmentShader: `varying vec3 vN; varying vec3 vW; void main(){ vec3 V = normalize(cameraPosition - vW);
+        float f = pow(clamp(1.0 - abs(dot(vN, V)), 0., 1.), 1.6); gl_FragColor = vec4(vec3(1.0,0.6,0.2)*f*1.1, f); }`,
+    }));
+    const light = new THREE.PointLight(0xffc27a, 60, 45, 1.6);
+    grp.add(ball, corona, light);
+    this.animated.push({ tick: (t, dt) => { surface.uniforms.uT.value = t; ball.rotation.y += dt * 0.03; light.intensity = 55 + Math.sin(t * 1.3) * 6; } });
+  }
+
+  /** A small moon sitting on a faint orbit ring around its planet. */
+  private buildMoonlet(g: THREE.Group, grp: THREE.Group, b: { r: number; orbit?: Vec & { r: number } }) {
+    const tex = craterTexture();
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(b.r, 32, 24), new THREE.MeshStandardMaterial({ map: tex, bumpMap: tex, bumpScale: 0.03, roughness: 0.95, color: 0xd8d2c8 }));
+    grp.add(ball);
+    if (b.orbit) {
+      const pts: THREE.Vector3[] = [];
+      for (let i = 0; i <= 128; i++) { const a = (i / 128) * Math.PI * 2; pts.push(new THREE.Vector3(b.orbit.x + Math.cos(a) * b.orbit.r, 0, b.orbit.z + Math.sin(a) * b.orbit.r)); }
+      const ring = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineDashedMaterial({ color: 0x9fb0d8, dashSize: 0.35, gapSize: 0.45, transparent: true, opacity: 0.4, depthWrite: false }));
+      ring.computeLineDistances(); g.add(ring);
+    }
+    this.animated.push({ tick: (_t, dt) => { ball.rotation.y += dt * 0.25; } });
+  }
+
   private buildBlackHole(grp: THREE.Group, r: number) {
     const hole = new THREE.Mesh(new THREE.SphereGeometry(r, 48, 32), new THREE.MeshBasicMaterial({ color: 0x000000 }));
     const lens = new THREE.Mesh(new THREE.SphereGeometry(r * 1.9, 48, 32), new THREE.ShaderMaterial({
@@ -349,6 +388,8 @@ export class OrbitScene {
     level.bodies.forEach((b, i) => {
       const grp = new THREE.Group(); grp.position.set(b.x, 0, b.z);
       if (b.kind === 'blackhole') { this.buildBlackHole(grp, b.r); g.add(grp); return; }
+      if (b.kind === 'sun') { this.buildSun(grp, b.r); g.add(grp); return; }
+      if (b.kind === 'moonlet') { this.buildMoonlet(g, grp, b); g.add(grp); return; }
       const style = b.style ?? (b.kind === 'giant' ? 'amber' : 'blue');
       const mat = planetMaterial(style, i * 3.7 + b.r);
       const ball = new THREE.Mesh(new THREE.SphereGeometry(b.r, 96, 64), mat); ball.rotation.z = 0.12;
@@ -470,7 +511,7 @@ export class OrbitScene {
     let i = 0;
     const put = (x: number, z: number) => {
       let d = 0; for (const B of masses) { const dx = x - B.x, dz = z - B.z; d += 15 * B.m / Math.sqrt(dx * dx + dz * dz + 5); }
-      const y = -1.4 - d;
+      const y = Math.max(-14, -1.4 - d); // suns dig deep wells: keep them on screen
       this.gridPos[i * 3] = x; this.gridPos[i * 3 + 1] = y; this.gridPos[i * 3 + 2] = z;
       const edge = Math.max(Math.abs(x) / GX, Math.abs(z) / GZ), f = Math.max(0, 1 - edge * edge) * 0.2, deep = Math.min(1, d / 5);
       this.gridCol[i * 3] = f * (0.35 + 0.5 * deep); this.gridCol[i * 3 + 1] = f * (0.42 + 0.1 * deep); this.gridCol[i * 3 + 2] = f * (0.85 - 0.2 * deep);
