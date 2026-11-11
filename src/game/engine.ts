@@ -2,8 +2,9 @@
 // Everything happens in the x/z plane; the 3D scene renders it at y = 0.
 
 export type Vec = { x: number; z: number };
-export type BodyKind = 'giant' | 'planet' | 'blackhole';
-export type Body = Vec & { r: number; m: number; name: string; kind: BodyKind; style?: string; ring?: boolean };
+export type BodyKind = 'giant' | 'planet' | 'blackhole' | 'sun' | 'moonlet';
+/** `orbit` (moonlets only) is the circle the moon sits on around its planet, drawn as a guide. */
+export type Body = Vec & { r: number; m: number; name: string; kind: BodyKind; style?: string; ring?: boolean; orbit?: Vec & { r: number } };
 /** `id` is the rock's index in the original level, kept when destroyed rocks are removed. */
 export type Rock = Vec & { r: number; id?: number };
 /** A crystal that lets light through and also reflects a copy. angle = normal direction in degrees. */

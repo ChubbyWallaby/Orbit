@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'vitest';
 import { previewLimit, trace, withDestroyed, type Level } from '@/game/engine';
-import { generateLevel, featureFor, FALLBACK_LEVEL, VARIETY_FROM } from '@/game/generate';
+import { generateLevel, featureFor, FALLBACK_LEVEL, VARIETY_FROM, COMPLEX_FROM } from '@/game/generate';
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
 import { MemoryStore, setStoreForTests, nextStreak, liveStreak } from '@/server/store';
 import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, GameError } from '@/server/game';
@@ -61,7 +61,7 @@ describe('board variety', () => {
     const seen = { giant: new Set<string>(), emitter: new Set<string>(), moon: new Set<string>(), side: new Set<string>(), mirror: new Set<string>() };
     for (let i = 1; i <= 15; i++) {
       const { level } = generateLevel(new Date(Date.UTC(2026, 10, 10 + i)).toISOString().slice(0, 10));
-      const giant = level.bodies.find((b) => b.kind === 'giant')!;
+      const giant = level.bodies.find((b) => b.kind === 'giant' || b.kind === 'sun')!;
       seen.giant.add(String(giant.style));
       seen.emitter.add(String(level.emitter.style));
       seen.moon.add(String(level.moon.style));
@@ -74,6 +74,33 @@ describe('board variety', () => {
     expect(seen.side.size).toBe(2);
     expect(seen.mirror.size).toBe(3);
   }, 120000);
+});
+
+describe('star systems', () => {
+  test('days before the system launch have no suns or moons', () => {
+    for (const day of ['2026-11-11', '2026-11-12']) {
+      expect(day < COMPLEX_FROM).toBe(true);
+      expect(generateLevel(day).level.bodies.some((b) => b.kind === 'sun' || b.kind === 'moonlet')).toBe(false);
+    }
+  });
+  test('later days always have at least two gravity bodies, and some have suns and moons', () => {
+    let suns = 0, moons = 0;
+    for (let i = 3; i <= 17; i++) {
+      const day = new Date(Date.UTC(2026, 10, 10 + i)).toISOString().slice(0, 10);
+      const { level, solution } = generateLevel(day);
+      const massive = level.bodies.filter((b) => b.kind !== 'moonlet');
+      expect(massive.length, day).toBeGreaterThanOrEqual(2);
+      expect(level.bodies.some((b) => b.kind === 'planet'), day).toBe(true);
+      expect(trace(level, solution).result, day).toBe('hit');
+      for (const m of level.bodies.filter((b) => b.kind === 'moonlet')) {
+        expect(Math.hypot(m.x - m.orbit!.x, m.z - m.orbit!.z)).toBeCloseTo(m.orbit!.r, 1); // sits on its orbit
+      }
+      if (level.bodies.some((b) => b.kind === 'sun')) suns++;
+      moons += level.bodies.filter((b) => b.kind === 'moonlet').length;
+    }
+    expect(suns).toBeGreaterThan(0);
+    expect(moons).toBeGreaterThan(0);
+  }, 180000);
 });
 
 describe('pieces', () => {

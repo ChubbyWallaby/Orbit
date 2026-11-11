@@ -33,11 +33,15 @@ const START_TEXT = 'Drag the moon into the beam. Turn its mirror. Light the beac
 
 /** A short description of today's board, e.g. "Ice giant · strong gravity · small mirror". */
 function conditions(level: Level): string | null {
-  const giant = level.bodies.find((b) => b.kind === 'giant');
+  const giant = level.bodies.find((b) => b.kind === 'giant' || b.kind === 'sun');
   if (!giant?.style) return null; // levels from before board variety
-  const names: Record<string, string> = { amber: 'Gas giant', ice: 'Ice giant', lava: 'Lava world', toxic: 'Toxic giant', violet: 'Violet giant' };
-  const gravity = giant.m >= 1 ? 'strong gravity' : giant.m < 0.7 ? 'weak gravity' : 'normal gravity';
+  const names: Record<string, string> = { amber: 'Gas giant', ice: 'Ice giant', lava: 'Lava world', toxic: 'Toxic giant', violet: 'Violet giant', sun: `Sun ${giant.name}` };
+  const gravity = giant.kind === 'sun' ? 'very strong gravity' : giant.m >= 1 ? 'strong gravity' : giant.m < 0.7 ? 'weak gravity' : 'normal gravity';
   const parts = [names[giant.style] ?? 'Giant', gravity];
+  const planets = level.bodies.filter((b) => b.kind === 'planet').length;
+  const moons = level.bodies.filter((b) => b.kind === 'moonlet').length;
+  if (planets) parts.push(`${planets} ${planets === 1 ? 'planet' : 'planets'}`);
+  if (moons) parts.push(`${moons} ${moons === 1 ? 'moon' : 'moons'}`);
   if (level.mirrorHalf < 1.35) parts.push('small mirror');
   else if (level.mirrorHalf > 1.65) parts.push('wide mirror');
   return parts.join(' · ');
@@ -171,8 +175,9 @@ export default function Game() {
       // with a beam splitter, one beam can destroy an asteroid while the other goes elsewhere
       else if (res.destroyed.length) setStatus({ text: `Asteroid destroyed! The way is clearer for your next shot.${tail}`, kind: 'bad' });
       else if (res.result === 'absorbed') {
-        const isHole = level.bodies.some((b) => b.kind === 'blackhole' && b.name === res.hitName);
-        setStatus({ text: `${isHole ? 'Swallowed by black hole' : 'Pulled into'} ${res.hitName}.${tail}`, kind: 'bad' });
+        const kind = level.bodies.find((b) => b.name === res.hitName)?.kind;
+        const verb = kind === 'blackhole' ? 'Swallowed by black hole' : kind === 'sun' ? 'Burned up in the sun' : 'Pulled into';
+        setStatus({ text: `${verb} ${res.hitName}.${tail}`, kind: 'bad' });
       }
       else if (res.result === 'rock') setStatus({ text: `Blocked by the asteroid belt.${tail}`, kind: 'bad' });
       else setStatus({ text: `Lost in deep space.${tail}`, kind: 'bad' });
@@ -252,7 +257,7 @@ export default function Game() {
         <div className="brand">
           <h1 className="wordmark">ORB<span>I</span>T</h1>
           {level && todaysPiece(level) && <div className="meta piece">{todaysPiece(level)!.label}</div>}
-          {level && conditions(level) && <div className="meta">{conditions(level)}</div>}
+          {level && conditions(level) && <div className="meta wrap">{conditions(level)}</div>}
           <div className="meta">{level ? `Daily #${level.number} · ${new Date(level.day + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })}` : 'Loading today’s puzzle…'}</div>
         </div>
         <div className="right">

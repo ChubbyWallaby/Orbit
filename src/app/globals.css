@@ -44,6 +44,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--mirror); ou
 .chip:hover { border-color: var(--dim); }
 .chip.streak { color: var(--gold); border-color: rgba(255, 207, 112, 0.4); }
 .meta.piece { color: var(--mirror); }
+.meta.wrap { white-space: normal; max-width: min(420px, 60vw); line-height: 1.5; }
 
 .helpers { top: calc(env(safe-area-inset-top, 0px) + 84px); right: var(--gutter-r); width: 230px; display: grid; gap: 8px; }
 .helpers h2 { margin: 0; font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }

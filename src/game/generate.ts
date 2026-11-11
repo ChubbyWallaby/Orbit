@@ -93,7 +93,71 @@ function buildCandidate(day: string, attempt: number, feature: Feature): Level {
   const moved = constrainMoon(level, level.moon.start);
   level.moon.start = { x: round(moved.x), z: round(moved.z) };
   if (day >= VARIETY_FROM) addVariety(level, rng(hash(`${day}#style#${attempt}`)));
+  if (day >= COMPLEX_FROM) addSystem(level, rng(hash(`${day}#system#${attempt}`)));
   return level;
+}
+
+/** Days from this date on get richer systems: suns, extra planets and moons. Earlier days must not change. */
+export const COMPLEX_FROM = '2026-11-13';
+
+const SUNS = ['Helion', 'Vesta', 'Arcturo', 'Sol Minor', 'Ember', 'Lyra'];
+const ROMAN = ['I', 'II', 'III'];
+
+/**
+ * Turns the board into a small star system: sometimes the giant becomes a sun, there is always at
+ * least one more planet, and planets (and the giant) may get moons on a drawn orbit.
+ * Uses its own random stream, after addVariety, so earlier days keep their exact levels.
+ */
+function addSystem(level: Level, r: () => number) {
+  const between = (a: number, b: number) => a + (b - a) * r();
+  const pick = <T,>(arr: readonly T[]) => arr[Math.floor(r() * arr.length)];
+  const B = level.bounds;
+  const occupied = (): (Vec & { r: number })[] => [
+    { ...level.emitter, r: 3 }, { ...level.target, r: level.target.r + 3 }, ...level.rocks.map((x) => ({ ...x, r: x.r + 1 })),
+    ...level.bodies.map((b) => ({ ...b, r: b.r + (b.kind === 'blackhole' ? 3 : 1.5) })),
+    ...level.splitters.map((sp) => ({ ...sp, r: sp.half + 1 })),
+    ...level.wormholes.flatMap((w) => [{ ...w.a, r: w.r + 1 }, { ...w.b, r: w.r + 1 }]),
+  ];
+  const free = (p: Vec, rad: number, gap: number) =>
+    Math.abs(p.x) < B.x - rad - 4 && Math.abs(p.z) < B.z - rad - 4 && occupied().every((o) => dist(o, p) > o.r + rad + gap);
+
+  // 1. sometimes the central giant is a sun: smaller, much stronger pull, burns light
+  const giant = level.bodies.find((b) => b.kind === 'giant')!;
+  if (r() < 0.35) {
+    Object.assign(giant, { kind: 'sun', style: 'sun', ring: false, name: pick(SUNS), r: round(between(2.6, 3.3)), m: round(between(1.4, 1.9)) });
+  }
+
+  // 2. one or two planets besides the giant or sun
+  const planetCount = () => level.bodies.filter((b) => b.kind === 'planet').length;
+  const wanted = r() < 0.4 ? 2 : 1;
+  for (let tries = 0; tries < 40 && planetCount() < wanted; tries++) {
+    const rad = round(between(1.7, 2.4));
+    const p = { x: round(between(-B.x + 8, B.x - 8)), z: round(between(-B.z + 7, B.z - 7)) };
+    if (!free(p, rad, 4)) continue;
+    level.bodies.push({ ...p, r: rad, m: round(between(0.25, 0.45)), name: pick(PLANETS), kind: 'planet', style: pick(PLANET_STYLES) });
+  }
+
+  // 3. moons on orbits around planets and around a giant (not around suns or black holes)
+  const parents = level.bodies.filter((b) => b.kind === 'planet' || b.kind === 'giant');
+  for (const parent of parents) {
+    const roll = r();
+    const count = parent.kind === 'giant' ? (roll < 0.4 ? 1 : 0) : roll < 0.2 ? 2 : roll < 0.75 ? 1 : 0;
+    const orbitR = round(parent.r + between(1.8, 2.8));
+    let made = 0;
+    for (let tries = 0; tries < 12 && made < count; tries++) {
+      const a = between(0, Math.PI * 2);
+      const rad = round(between(0.45, 0.7));
+      const p = { x: round(parent.x + Math.cos(a) * orbitR), z: round(parent.z + Math.sin(a) * orbitR) };
+      // keep clear of everything except its own planet
+      const others = occupied().filter((o) => !(o.x === parent.x && o.z === parent.z));
+      if (Math.abs(p.x) > B.x - 4 || Math.abs(p.z) > B.z - 4 || !others.every((o) => dist(o, p) > o.r + rad + 1.5)) continue;
+      level.bodies.push({ ...p, r: rad, m: round(between(0.04, 0.08), 3), name: `${parent.name} ${ROMAN[made]}`, kind: 'moonlet', orbit: { x: parent.x, z: parent.z, r: orbitR } });
+      made++;
+    }
+  }
+
+  const c = constrainMoon(level, level.moon.start);
+  level.moon.start = { x: round(c.x), z: round(c.z) };
 }
 
 /** Days from this date on get varied planets, gravity, stations, moons, mirrors and board orientation. */
@@ -279,6 +343,8 @@ export function generateLevel(day: string): Generated {
     const f = attempt < 60 ? feature : 'plain';
     const level = buildCandidate(day, attempt, f);
     if (!hasFeature(level, f)) continue;
+    // from COMPLEX_FROM every board has at least two gravity bodies (giant or sun, plus a planet)
+    if (day >= COMPLEX_FROM && !level.bodies.some((b) => b.kind === 'planet')) continue;
     const ok = validate(level);
     if (ok) return { level, solution: ok.solution, solutions: ok.solutions, attempts: attempt + 1 };
   }
