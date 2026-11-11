@@ -143,9 +143,9 @@ export class OrbitScene {
   private sparks: THREE.Mesh[] = [];
   private beamMat = new THREE.MeshBasicMaterial({ color: LASER.clone().multiplyScalar(2.6), toneMapped: false, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
   private previewMat = new THREE.LineDashedMaterial({ color: LASER.clone().multiplyScalar(1.4), dashSize: 0.45, gapSize: 0.35, transparent: true, opacity: 0.85, toneMapped: false });
-  private flash: THREE.Mesh;
+  private flashes: { mesh: THREE.Mesh; t0: number }[] = [];
+  private flashGeo = new THREE.SphereGeometry(1, 24, 16);
   private rockMat = new THREE.MeshStandardMaterial({ color: 0x6d6358, roughness: 1, flatShading: true });
-  private flashT = -1;
   private firing: { rays: Ray[]; meshes: THREE.Mesh[]; t0: number; dur: number; length: number; done: () => void } | null = null;
   private dragging: Drag | null = null;
   private dragOffset = new THREE.Vector2();
@@ -180,8 +180,7 @@ export class OrbitScene {
     const sun = new THREE.DirectionalLight(0xfff1dd, 2.6); sun.position.copy(SUN).multiplyScalar(50);
     this.scene.add(sun, new THREE.AmbientLight(0x6070a0, 0.35), this.levelGroup);
 
-    this.flash = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), new THREE.MeshBasicMaterial({ color: hdr(0xffffff, 3), toneMapped: false, transparent: true, opacity: 0 }));
-    this.scene.add(this.flash, this.preview, this.beams);
+    this.scene.add(this.preview, this.beams);
 
     this.moon.visible = false;
     this.scene.add(this.moon, this.sat);
@@ -575,7 +574,7 @@ export class OrbitScene {
   private explode(p: Vec, radius: number) {
     const mat = new THREE.MeshBasicMaterial({ color: hdr(0xffa060, 3), toneMapped: false });
     // expanding shockwave ring
-    const ring = new THREE.Mesh(new THREE.RingGeometry(0.8, 1.1, 64), new THREE.MeshBasicMaterial({ color: hdr(0xffb070, 2.5), toneMapped: false, transparent: true, side: THREE.DoubleSide }));
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.8, 1.1, 64), new THREE.MeshBasicMaterial({ color: hdr(0xffb070, 2.5), toneMapped: false, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
     ring.rotation.x = -Math.PI / 2; ring.position.set(p.x, 0.1, p.z);
     this.scene.add(ring); this.shockwaves.push({ mesh: ring, t0: performance.now(), size: radius });
     for (let i = 0; i < 44; i++) {
@@ -628,8 +627,12 @@ export class OrbitScene {
   }
 
   private flashAt(p: Vec, color: number) {
-    (this.flash.material as THREE.MeshBasicMaterial).color.copy(hdr(color, 3));
-    this.flash.position.set(p.x, 0, p.z); this.flashT = performance.now();
+    // Each flash is its own short-lived mesh. It must not write depth: a faded-out sphere that still
+    // wrote depth used to hide the laser inside it on later shots.
+    const mesh = new THREE.Mesh(this.flashGeo, new THREE.MeshBasicMaterial({ color: hdr(color, 3), toneMapped: false, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+    mesh.position.set(p.x, 0, p.z);
+    this.scene.add(mesh);
+    this.flashes.push({ mesh, t0: performance.now() });
   }
 
   // ---- dragging ----
@@ -706,11 +709,13 @@ export class OrbitScene {
       m.opacity = 1 - k;
       return true;
     });
-    if (this.flashT > 0) {
-      const k = Math.max(0, (now - this.flashT) / 700);
-      const m = this.flash.material as THREE.MeshBasicMaterial;
-      if (k >= 1) { m.opacity = 0; this.flashT = -1; } else { m.opacity = (1 - k) * 0.9; this.flash.scale.setScalar(0.4 + k * 3); }
-    }
+    this.flashes = this.flashes.filter((f) => {
+      const k = Math.max(0, (now - f.t0) / 700);
+      const m = f.mesh.material as THREE.MeshBasicMaterial;
+      if (k >= 1) { this.scene.remove(f.mesh); m.dispose(); return false; }
+      m.opacity = (1 - k) * 0.9; f.mesh.scale.setScalar(0.4 + k * 3);
+      return true;
+    });
     if (this.beams.children.length && !this.firing) this.beamMat.color.copy(LASER).multiplyScalar(2.2 + Math.sin(t * 9) * 0.35);
     this.controls.update();
     this.composer.render();
