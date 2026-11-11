@@ -130,7 +130,11 @@ export class OrbitScene {
   private sat = new THREE.Group();
   private satMirror = new THREE.Group();
   private satPick = new THREE.Mesh();
-  private ghost: THREE.Mesh;
+  /** meshes (rock + its dust) for each asteroid id, so destroyed ones can be hidden */
+  private rockMeshes = new Map<number, THREE.Mesh[]>();
+  private destroyed = new Set<number>();
+  private debris: { mesh: THREE.Mesh; v: THREE.Vector3; t0: number }[] = [];
+  private shockwaves: { mesh: THREE.Mesh; t0: number; size: number }[] = [];
   private grid!: THREE.LineSegments;
   private gridPos!: Float32Array;
   private gridCol!: Float32Array;
@@ -140,6 +144,7 @@ export class OrbitScene {
   private beamMat = new THREE.MeshBasicMaterial({ color: LASER.clone().multiplyScalar(2.6), toneMapped: false, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
   private previewMat = new THREE.LineDashedMaterial({ color: LASER.clone().multiplyScalar(1.4), dashSize: 0.45, gapSize: 0.35, transparent: true, opacity: 0.85, toneMapped: false });
   private flash: THREE.Mesh;
+  private rockMat = new THREE.MeshStandardMaterial({ color: 0x6d6358, roughness: 1, flatShading: true });
   private flashT = -1;
   private firing: { rays: Ray[]; meshes: THREE.Mesh[]; t0: number; dur: number; length: number; done: () => void } | null = null;
   private dragging: Drag | null = null;
@@ -176,9 +181,7 @@ export class OrbitScene {
     this.scene.add(sun, new THREE.AmbientLight(0x6070a0, 0.35), this.levelGroup);
 
     this.flash = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), new THREE.MeshBasicMaterial({ color: hdr(0xffffff, 3), toneMapped: false, transparent: true, opacity: 0 }));
-    this.ghost = new THREE.Mesh(new THREE.RingGeometry(2.8, 3, 96), new THREE.MeshBasicMaterial({ color: hdr(MIRROR, 1.3), toneMapped: false, transparent: true, opacity: 0.7, side: THREE.DoubleSide }));
-    this.ghost.rotation.x = -Math.PI / 2; this.ghost.visible = false;
-    this.scene.add(this.flash, this.ghost, this.preview, this.beams);
+    this.scene.add(this.flash, this.preview, this.beams);
 
     this.moon.visible = false;
     this.scene.add(this.moon, this.sat);
@@ -427,20 +430,24 @@ export class OrbitScene {
     }
 
     // rocks
-    const rockMat = new THREE.MeshStandardMaterial({ color: 0x6d6358, roughness: 1, flatShading: true });
+    const rockMat = this.rockMat;
     const rocks: THREE.Mesh[] = [];
+    this.rockMeshes = new Map();
     level.rocks.forEach((R, i) => {
+      const group: THREE.Mesh[] = [];
+      this.rockMeshes.set(R.id ?? i, group);
       const geo = new THREE.IcosahedronGeometry(R.r, 1); const p = geo.attributes.position;
       for (let k = 0; k < p.count; k++) { const v = new THREE.Vector3().fromBufferAttribute(p, k); v.multiplyScalar(0.9 + Math.sin(k * 12.9898 + i * 7.1) * 0.2); p.setXYZ(k, v.x, v.y, v.z); }
       geo.computeVertexNormals();
-      const m = new THREE.Mesh(geo, rockMat); m.position.set(R.x, 0, R.z); rocks.push(m); g.add(m);
+      const m = new THREE.Mesh(geo, rockMat); m.position.set(R.x, 0, R.z); rocks.push(m); group.push(m); g.add(m);
       for (let d = 0; d < 5; d++) {
         const a = Math.random() * Math.PI * 2, rr = R.r + 0.4 + Math.random() * 1.2;
         const dust = new THREE.Mesh(new THREE.IcosahedronGeometry(0.1 + Math.random() * 0.18, 0), rockMat);
-        dust.position.set(R.x + Math.cos(a) * rr, (Math.random() - 0.5) * 1.4, R.z + Math.sin(a) * rr); rocks.push(dust); g.add(dust);
+        dust.position.set(R.x + Math.cos(a) * rr, (Math.random() - 0.5) * 1.4, R.z + Math.sin(a) * rr); rocks.push(dust); group.push(dust); g.add(dust);
       }
     });
     this.animated.push({ tick: (_t, dt) => { for (const r of rocks) { r.rotation.x += dt * 0.2; r.rotation.y += dt * 0.13; } } });
+    this.setDestroyed([...this.destroyed]);
 
     this.buildGrid(level);
   }
@@ -517,9 +524,26 @@ export class OrbitScene {
     }
   }
 
-  setGhost(g: { x: number; z: number; radius: number } | null) {
-    this.ghost.visible = !!g;
-    if (g) { this.ghost.position.set(g.x, 0.05, g.z); this.ghost.scale.setScalar(g.radius / 3); }
+  /** Hides asteroids the player has destroyed with the energized laser. */
+  setDestroyed(ids: readonly number[]) {
+    this.destroyed = new Set(ids);
+    for (const [id, meshes] of this.rockMeshes) for (const m of meshes) m.visible = !this.destroyed.has(id);
+  }
+
+  /** Bursts an asteroid into glowing debris (the energized laser). */
+  private explode(p: Vec, radius: number) {
+    const mat = new THREE.MeshBasicMaterial({ color: hdr(0xffa060, 3), toneMapped: false });
+    // expanding shockwave ring
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.8, 1.1, 64), new THREE.MeshBasicMaterial({ color: hdr(0xffb070, 2.5), toneMapped: false, transparent: true, side: THREE.DoubleSide }));
+    ring.rotation.x = -Math.PI / 2; ring.position.set(p.x, 0.1, p.z);
+    this.scene.add(ring); this.shockwaves.push({ mesh: ring, t0: performance.now(), size: radius });
+    for (let i = 0; i < 44; i++) {
+      const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.14 + Math.random() * 0.32, 0), i % 2 ? this.rockMat : mat);
+      mesh.position.set(p.x, 0, p.z);
+      const dir = new THREE.Vector3(Math.random() - 0.5, (Math.random() - 0.5) * 0.8, Math.random() - 0.5).normalize();
+      this.debris.push({ mesh, v: dir.multiplyScalar(3 + Math.random() * 6 * radius), t0: performance.now() });
+      this.scene.add(mesh);
+    }
   }
 
   setWon(won: boolean) { this.won = won; }
@@ -534,7 +558,8 @@ export class OrbitScene {
     for (const ray of res.rays) this.beams.add(new THREE.Mesh(beamGeometry(ray.pts), this.beamMat));
   }
 
-  fire(res: TraceResult): Promise<void> {
+  /** Animates a shot. With `explodeRocks` (energized laser), asteroids the beam hits burst apart. */
+  fire(res: TraceResult, explodeRocks = false): Promise<void> {
     this.clearBeam();
     const meshes = res.rays.map((ray) => {
       const m = new THREE.Mesh(beamGeometry(ray.pts), this.beamMat);
@@ -550,6 +575,11 @@ export class OrbitScene {
           const last = ray.pts[ray.pts.length - 1];
           if (ray.result === 'lost') continue;
           this.flashAt(last, ray.result === 'hit' ? BEACON : ray.result === 'rock' ? 0xff9a6e : 0xff4f6e);
+          if (explodeRocks && ray.rockId !== undefined && this.level) {
+            const rock = this.level.rocks.find((r, i) => (r.id ?? i) === ray.rockId);
+            if (rock) this.explode(rock, rock.r);
+            for (const m of this.rockMeshes.get(ray.rockId) ?? []) m.visible = false;
+          }
         }
         done();
       } };
@@ -606,7 +636,6 @@ export class OrbitScene {
   private tick = (now: number) => {
     const dt = Math.min(this.clock.getDelta(), 0.05), t = this.clock.elapsedTime * (this.reduceMotion ? 0.15 : 1);
     for (const a of this.animated) a.tick(t, this.reduceMotion ? dt * 0.15 : dt);
-    this.ghost.rotation.z = t * 0.3;
     if (this.firing) {
       const F = this.firing, k = Math.max(0, Math.min(1, (now - F.t0) / F.dur)), d = k * F.length;
       F.rays.forEach((ray, i) => {
@@ -618,6 +647,24 @@ export class OrbitScene {
       });
       if (k >= 1) { for (const sp of this.sparks) sp.visible = false; this.firing = null; F.done(); }
     }
+    // energized-laser debris flies out and shrinks away
+    this.debris = this.debris.filter((d) => {
+      const age = (now - d.t0) / 1000;
+      if (age > 1.6) { this.scene.remove(d.mesh); d.mesh.geometry.dispose(); return false; }
+      d.mesh.position.addScaledVector(d.v, Math.min(0.05, 1 / 60));
+      d.v.multiplyScalar(0.97);
+      d.mesh.scale.setScalar(Math.max(0.01, 1 - age / 1.6));
+      d.mesh.rotation.x += 0.2; d.mesh.rotation.y += 0.15;
+      return true;
+    });
+    this.shockwaves = this.shockwaves.filter((w) => {
+      const k = (now - w.t0) / 700;
+      const m = w.mesh.material as THREE.MeshBasicMaterial;
+      if (k >= 1) { this.scene.remove(w.mesh); w.mesh.geometry.dispose(); m.dispose(); return false; }
+      w.mesh.scale.setScalar(1 + k * 4 * w.size);
+      m.opacity = 1 - k;
+      return true;
+    });
     if (this.flashT > 0) {
       const k = Math.max(0, (now - this.flashT) / 700);
       const m = this.flash.material as THREE.MeshBasicMaterial;

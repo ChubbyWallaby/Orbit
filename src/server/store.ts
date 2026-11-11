@@ -5,7 +5,8 @@ import { Redis } from '@upstash/redis';
 import type { HelperId } from '@/game/rules';
 
 export type PlayStatus = 'playing' | 'won' | 'lost';
-export type Play = { shots: string[]; helpers: HelperId[]; status: PlayStatus; score: number };
+/** `destroyed`: ids of asteroids this player blew up today with the energized laser. */
+export type Play = { shots: string[]; helpers: HelperId[]; status: PlayStatus; score: number; destroyed: number[] };
 export type BoardEntry = { rank: number; name: string; score: number; games: number; best: number; you: boolean };
 export type Streak = { current: number; best: number };
 
@@ -18,6 +19,7 @@ export interface Store {
   releaseName(pid: string, name: string): Promise<void>;
   getPlay(day: string, pid: string): Promise<Play>;
   addHelper(day: string, pid: string, helper: HelperId): Promise<HelperId[]>;
+  addDestroyed(day: string, pid: string, rocks: number[]): Promise<void>;
   /** Atomically reserves the next shot. Returns the 1-based shot number. */
   reserveShot(day: string, pid: string): Promise<number>;
   recordShot(day: string, pid: string, shot: number, result: string): Promise<void>;
@@ -90,7 +92,8 @@ class RedisStore implements Store {
     const shots: string[] = [];
     for (let i = 1; i <= 3; i++) if (h?.[`shot${i}`]) shots.push(String(h[`shot${i}`]));
     const helpers = String(h?.helpers ?? '').split(',').filter(Boolean) as HelperId[];
-    return { shots, helpers, status: (h?.status as PlayStatus) ?? 'playing', score: Number(h?.score ?? 0) };
+    const destroyed = String(h?.destroyed ?? '').split(',').filter(Boolean).map(Number);
+    return { shots, helpers, status: (h?.status as PlayStatus) ?? 'playing', score: Number(h?.score ?? 0), destroyed };
   }
   async addHelper(day: string, pid: string, helper: HelperId) {
     const play = await this.getPlay(day, pid);
@@ -100,6 +103,12 @@ class RedisStore implements Store {
       await this.r.expire(k.play(day, pid), DAY_TTL);
     }
     return play.helpers;
+  }
+  async addDestroyed(day: string, pid: string, rocks: number[]) {
+    const play = await this.getPlay(day, pid);
+    const all = [...new Set([...play.destroyed, ...rocks])];
+    await this.r.hset(k.play(day, pid), { destroyed: all.join(',') });
+    await this.r.expire(k.play(day, pid), DAY_TTL);
   }
   async reserveShot(day: string, pid: string) {
     const n = await this.r.incr(k.shots(day, pid));
@@ -213,10 +222,14 @@ export class MemoryStore implements Store {
   private play(day: string, pid: string) {
     const key = `${day}:${pid}`;
     let p = this.plays.get(key);
-    if (!p) { p = { shots: [], helpers: [], status: 'playing', score: 0 }; this.plays.set(key, p); }
+    if (!p) { p = { shots: [], helpers: [], status: 'playing', score: 0, destroyed: [] }; this.plays.set(key, p); }
     return p;
   }
-  async getPlay(day: string, pid: string) { const p = this.play(day, pid); return { ...p, shots: [...p.shots], helpers: [...p.helpers] }; }
+  async getPlay(day: string, pid: string) { const p = this.play(day, pid); return { ...p, shots: [...p.shots], helpers: [...p.helpers], destroyed: [...p.destroyed] }; }
+  async addDestroyed(day: string, pid: string, rocks: number[]) {
+    const p = this.play(day, pid);
+    p.destroyed = [...new Set([...p.destroyed, ...rocks])];
+  }
   async addHelper(day: string, pid: string, helper: HelperId) {
     const p = this.play(day, pid);
     if (!p.helpers.includes(helper)) p.helpers.push(helper);

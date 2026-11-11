@@ -1,9 +1,9 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { constrainMoon, previewLimit, trace, SATELLITE_RADIUS, type Level, type Placement, type TraceResult, type Vec } from '@/game/engine';
+import { constrainMoon, previewLimit, trace, withDestroyed, SATELLITE_RADIUS, type Level, type Placement, type TraceResult, type Vec } from '@/game/engine';
 import { HELPER_ORDER, HELPERS, MAX_SHOTS, msUntilNextPuzzle, scoreFor, shareText, type HelperId } from '@/game/rules';
 import type { OrbitScene } from '@/game/scene';
-import type { GhostHint, TodayPayload } from '@/server/game';
+import type { TodayPayload } from '@/server/game';
 import type { Play, Streak } from '@/server/store';
 import { track } from '@vercel/analytics';
 import Leaderboard from './Leaderboard';
@@ -59,9 +59,10 @@ export default function Game() {
   const [data, setData] = useState<TodayPayload | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [placement, setPlacement] = useState<Placement | null>(null);
-  const [play, setPlay] = useState<Play>({ shots: [], helpers: [], status: 'playing', score: 0 });
+  const [play, setPlay] = useState<Play>({ shots: [], helpers: [], status: 'playing', score: 0, destroyed: [] });
+  // asteroids blown up during practice (local only, never sent to the server)
+  const [practiceDestroyed, setPracticeDestroyed] = useState<number[]>([]);
   const [streak, setStreak] = useState<Streak>({ current: 0, best: 0 });
-  const [ghost, setGhost] = useState<GhostHint | null>(null);
   const [name, setName] = useState<string | null>(null);
   const [nameOpen, setNameOpen] = useState(false);
   const [boardOpen, setBoardOpen] = useState(false);
@@ -80,6 +81,8 @@ export default function Game() {
   const finished = play.status !== 'playing';
   const canAim = !finished || practice;
   const helpers = play.helpers;
+  const energized = helpers.includes('energized');
+  const destroyed = useMemo(() => [...play.destroyed, ...practiceDestroyed], [play.destroyed, practiceDestroyed]);
 
   // create the 3D scene once
   useEffect(() => {
@@ -101,7 +104,7 @@ export default function Game() {
   // load today's puzzle
   useEffect(() => {
     api<TodayPayload>('/api/today').then((d) => {
-      setData(d); setPlay(d.me.play); setGhost(d.ghost); setName(d.me.name); setStreak(d.me.streak);
+      setData(d); setPlay(d.me.play); setName(d.me.name); setStreak(d.me.streak);
       const piece = todaysPiece(d.level);
       if (piece) setStatus({ text: piece.intro });
       const p = loadPlacement(d.level);
@@ -126,7 +129,7 @@ export default function Game() {
     s.setLevel(level); s.frame();
   }, [sceneReady, level]);
 
-  const preview: TraceResult | null = useMemo(() => (level && placement ? trace(level, placement) : null), [level, placement]);
+  const preview: TraceResult | null = useMemo(() => (level && placement ? trace(withDestroyed(level, destroyed), placement) : null), [level, placement, destroyed]);
 
   useEffect(() => {
     const s = sceneRef.current;
@@ -147,7 +150,7 @@ export default function Game() {
     try { localStorage.setItem(placementKey(level.day), JSON.stringify(placement)); } catch { /* ignore */ }
   }, [sceneReady, level, placement, preview, helpers, canAim, busy, play.status]);
 
-  useEffect(() => { sceneRef.current?.setGhost(ghost); }, [sceneReady, ghost]);
+  useEffect(() => { sceneRef.current?.setDestroyed(destroyed); }, [sceneReady, level, destroyed]);
 
   const fire = useCallback(async () => {
     if (!level || !placement || busy || finished) return;
@@ -157,14 +160,16 @@ export default function Game() {
     const s = sceneRef.current;
     s?.setPreview(null, 0); s?.clearBeam();
     try {
-      const res = await api<{ result: TraceResult['result']; hitName: string | null; score: number; status: Play['status']; play: Play; streak: Streak }>('/api/shot', { placement });
-      if (s && preview) await s.fire(preview);
+      const res = await api<{ result: TraceResult['result']; hitName: string | null; destroyed: number[]; score: number; status: Play['status']; play: Play; streak: Streak }>('/api/shot', { placement });
+      if (s && preview) await s.fire(preview, energized);
       beamFor.current = placement;
       setPlay(res.play);
       setStreak(res.streak);
       const left = MAX_SHOTS - res.play.shots.length;
       const tail = left ? ` ${left} ${left === 1 ? 'shot' : 'shots'} left.` : '';
       if (res.result === 'hit') setStatus({ text: `Beacon lit! +${res.score} points.`, kind: 'good' });
+      // with a beam splitter, one beam can destroy an asteroid while the other goes elsewhere
+      else if (res.destroyed.length) setStatus({ text: `Asteroid destroyed! The way is clearer for your next shot.${tail}`, kind: 'bad' });
       else if (res.result === 'absorbed') {
         const isHole = level.bodies.some((b) => b.kind === 'blackhole' && b.name === res.hitName);
         setStatus({ text: `${isHole ? 'Swallowed by black hole' : 'Pulled into'} ${res.hitName}.${tail}`, kind: 'bad' });
@@ -183,7 +188,7 @@ export default function Game() {
     } finally {
       setBusy(false);
     }
-  }, [level, placement, busy, finished, name, preview]);
+  }, [level, placement, busy, finished, name, preview, energized]);
 
   // practice shots are traced locally with the same physics and never sent to the server
   const practiceFire = async () => {
@@ -192,9 +197,11 @@ export default function Game() {
     setStatus({ text: 'Practice beam away…' });
     const s = sceneRef.current;
     s?.setPreview(null, 0); s?.clearBeam();
-    if (s) await s.fire(preview);
+    if (s) await s.fire(preview, energized);
+    if (energized && preview.rocksHit.length) setPracticeDestroyed((d) => [...new Set([...d, ...preview.rocksHit])]);
     beamFor.current = placement;
     if (preview.result === 'hit') setStatus({ text: 'Practice: beacon lit! This one doesn’t count.', kind: 'good' });
+    else if (energized && preview.rocksHit.length) setStatus({ text: 'Practice: asteroid destroyed!', kind: 'bad' });
     else if (preview.result === 'absorbed') setStatus({ text: `Practice: pulled into ${preview.hitName}.`, kind: 'bad' });
     else if (preview.result === 'rock') setStatus({ text: 'Practice: blocked by the asteroid belt.', kind: 'bad' });
     else setStatus({ text: 'Practice: lost in deep space.', kind: 'bad' });
@@ -220,16 +227,15 @@ export default function Game() {
     if (confirming !== id) { setConfirming(id); return; }
     setConfirming(null);
     try {
-      const r = await api<{ helpers: HelperId[]; ghost: GhostHint | null }>('/api/helper', { helper: id });
+      const r = await api<{ helpers: HelperId[] }>('/api/helper', { helper: id });
       setPlay((p) => ({ ...p, helpers: r.helpers }));
       track('helper_used', { helper: id });
       setHelpersOpen(false);
-      setGhost(r.ghost);
       if (id === 'satellite') {
         const pos = constrainMoon(level, { x: placement.moon.x + 6, z: placement.moon.z }, SATELLITE_RADIUS);
         setPlacement({ ...placement, satellite: { x: Math.round(pos.x * 100) / 100, z: Math.round(pos.z * 100) / 100, angle: 0 } });
         setStatus({ text: 'Mirror satellite deployed. Drag it and turn it with its dial.' });
-      } else if (id === 'ghost') setStatus({ text: 'The ghost ring marks where the moon can solve it.' });
+      } else if (id === 'energized') setStatus({ text: 'Laser energized. Any asteroid it hits will explode.' });
       else setStatus({ text: 'Scanner on. The aiming line now reaches much further.' });
     } catch (e) { setStatus({ text: (e as Error).message, kind: 'bad' }); }
   };

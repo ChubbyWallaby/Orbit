@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { previewLimit, trace, type Level } from '@/game/engine';
+import { previewLimit, trace, withDestroyed, type Level } from '@/game/engine';
 import { generateLevel, featureFor, FALLBACK_LEVEL, VARIETY_FROM } from '@/game/generate';
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
 import { MemoryStore, setStoreForTests, nextStreak, liveStreak } from '@/server/store';
-import { cleanName, parsePlacement, ghostFor, leaderboard, levelFor, setName, shoot, today, applyHelper, GameError } from '@/server/game';
+import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, GameError } from '@/server/game';
 
 const DAY = '2026-11-10';
 
@@ -12,8 +12,9 @@ describe('rules', () => {
     expect(scoreFor(1, [])).toBe(1000);
     expect(scoreFor(2, [])).toBe(700);
     expect(scoreFor(3, ['scanner'])).toBe(250);
-    expect(scoreFor(3, ['scanner', 'satellite', 'ghost'])).toBe(50);
-    expect(scoreFor(1, ['ghost', 'ghost'])).toBe(700);
+    expect(scoreFor(3, ['scanner', 'satellite', 'energized'])).toBe(50);
+    expect(scoreFor(1, ['energized', 'energized'])).toBe(800);
+    expect(scoreFor(1, ['ghost'])).toBe(700); // retired helper still scores for plays that used it
   });
   test('calendar', () => {
     expect(puzzleNumber('2026-11-10')).toBe(1);
@@ -43,8 +44,6 @@ describe('generator', () => {
       const sol = trace(g.level, g.solution);
       expect(sol.result, day).toBe('hit');
       expect(sol.bounces, day).toBeGreaterThan(0);
-      const gh = await ghostFor(day);
-      expect(Math.hypot(gh.x - g.solution.moon.x, gh.z - g.solution.moon.z)).toBeLessThan(gh.radius);
     }
     expect([...kinds].sort()).toEqual(['blackhole', 'plain', 'splitter', 'wormhole']);
   }, 240000);
@@ -97,6 +96,16 @@ describe('pieces', () => {
     expect(res.result).toBe('hit');
     expect(res.rays[1].start).toBeGreaterThan(15);
   });
+
+  test('asteroids hit by the beam are reported, and destroyed ones stop blocking', () => {
+    const level = bare({ rocks: [{ x: 0, z: 0, r: 1 }, { x: 5, z: 6, r: 1 }] });
+    const blocked = trace(level, farMoon);
+    expect(blocked).toMatchObject({ result: 'rock', rocksHit: [0] });
+    const cleared = withDestroyed(level, [0]);
+    expect(cleared.rocks).toEqual([{ x: 5, z: 6, r: 1, id: 1 }]);
+    expect(trace(cleared, farMoon).result).toBe('hit');
+  });
+
 
   test('wormholes carry light to the other mouth', () => {
     const level = bare({ target: { x: 10, z: 12, r: 1.5 }, wormholes: [{ a: { x: -5, z: 0 }, b: { x: -5, z: 12 }, r: 1.1 }] });
@@ -170,7 +179,7 @@ describe('server game', () => {
     const r = await shoot('a', sol(), DAY);
     expect(r).toMatchObject({ result: 'hit', status: 'won', score: 550, shot: 2 });
     await expect(shoot('a', sol(), DAY)).rejects.toThrow('already finished');
-    await expect(applyHelper('a', 'ghost', DAY)).rejects.toThrow('already finished');
+    await expect(applyHelper('a', 'energized', DAY)).rejects.toThrow('already finished');
   });
 
   test('three misses lose with zero points and count as a game', async () => {
@@ -181,20 +190,45 @@ describe('server game', () => {
     expect(lb.me).toMatchObject({ score: 0, games: 1 });
   });
 
-  test('satellite needs the helper and ghost is only revealed after use', async () => {
+  test('satellite needs the helper, and the retired ghost moon is refused', async () => {
     await setName('c', 'Cy');
     const withSat = { ...miss(), satellite: { x: -20, z: -18, angle: 0 } };
     await expect(shoot('c', withSat, DAY)).rejects.toThrow('Unlock the mirror satellite');
-    expect((await today('c', DAY)).ghost).toBeNull();
-    const h = await applyHelper('c', 'ghost', DAY);
-    expect(h.ghost).not.toBeNull();
-    expect((await today('c', DAY)).ghost).not.toBeNull();
+    await expect(applyHelper('c', 'ghost', DAY)).rejects.toThrow('Unknown helper');
+    expect((await applyHelper('c', 'energized', DAY)).helpers).toEqual(['energized']);
   });
+
 
   test('rejects impossible placements', async () => {
     await setName('d', 'Di');
     await expect(shoot('d', { moon: { x: giant.x, z: giant.z }, angle: 0 }, DAY)).rejects.toThrow('cannot sit');
     await expect(shoot('d', { moon: { x: 'a' }, angle: 0 }, DAY)).rejects.toThrow('Invalid shot');
+  });
+
+  test('the energized laser destroys an asteroid so the next shot gets through', async () => {
+    // a custom level where an asteroid sits right in the laser's path to the beacon
+    const day = '2099-01-01';
+    const level: Level = { ...FALLBACK_LEVEL(day), emitter: { x: -20, z: 0, dir: 0 }, target: { x: 20, z: 0, r: 1.5 }, bodies: [], splitters: [], wormholes: [], rocks: [{ x: 0, z: 0, r: 1 }] };
+    const placement = { moon: { x: -25, z: 20 }, angle: 0 };
+    await store.setCached(`level:v3:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
+    await setName('e', 'Eve');
+    expect((await shoot('e', placement, day)).result).toBe('rock'); // without the helper the rock survives
+    expect((await shoot('e', placement, day)).result).toBe('rock');
+    await applyHelper('e', 'energized', day);
+    const third = await shoot('e', placement, day);
+    expect(third).toMatchObject({ result: 'rock', destroyed: [0], status: 'lost' });
+    expect(third.play.destroyed).toEqual([0]);
+  });
+
+  test('a destroyed asteroid lets a later shot win', async () => {
+    const day = '2099-01-02';
+    const level: Level = { ...FALLBACK_LEVEL(day), emitter: { x: -20, z: 0, dir: 0 }, target: { x: 20, z: 0, r: 1.5 }, bodies: [], splitters: [], wormholes: [], rocks: [{ x: 0, z: 0, r: 1 }] };
+    const placement = { moon: { x: -25, z: 20 }, angle: 0 };
+    await store.setCached(`level:v3:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
+    await setName('f', 'Fox');
+    await applyHelper('f', 'energized', day);
+    expect((await shoot('f', placement, day)).destroyed).toEqual([0]);
+    expect(await shoot('f', placement, day)).toMatchObject({ result: 'hit', status: 'won', score: 700 - 200 });
   });
 
   test('cumulative leaderboard ranks across days and marks you', async () => {
