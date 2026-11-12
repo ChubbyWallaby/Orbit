@@ -4,6 +4,9 @@ export const MAX_SHOTS = 3;
 export const SHOT_BASE = [1000, 700, 400] as const;
 export const MIN_WIN_SCORE = 50;
 export const LAUNCH_DAY = '2026-11-10';
+/** Public address of the game, used in shared results and link previews. */
+export const SITE_URL = 'https://orbitpuzzle.com';
+export const SITE_NAME = 'orbitpuzzle.com';
 
 /** 'ghost' (Ghost moon) is retired: kept only so plays that already used it still score correctly. */
 export type HelperId = 'scanner' | 'satellite' | 'energized' | 'ghost';
@@ -51,5 +54,6 @@ export function shareText(opts: { number: number; shots: string[]; score: number
     `${squares}  ${won ? opts.score + ' pts' : 'beacon dark'}`,
     helperIcons ? `helpers ${helperIcons}` : 'no helpers',
     ...(opts.streak && opts.streak > 1 ? [`🔥 ${opts.streak}-day streak`] : []),
+    SITE_NAME, // so anyone who sees a result can click through and play
   ].join('\n');
 }
