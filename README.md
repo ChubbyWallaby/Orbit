@@ -11,8 +11,17 @@ A daily 3D space puzzle. A station fires a laser that bends around planets. Drag
 
 ## Puzzle pieces
 
-Most days add one special piece, placed on the laser's path: a **black hole** (strong gravity, swallows light), a **beam splitter** (splits the laser in two; either beam can win) or a **wormhole pair** (light enters one mouth and leaves the other).
-- The all-time leaderboard adds up every day's points. There is also a board for today.
+Most days add a special piece, and some days add two. Each piece is placed so it matters for that day's beam:
+
+- **Black hole**: strong gravity, swallows light.
+- **Repulsor**: negative mass. It pushes light away instead of pulling it in.
+- **Beam splitter**: splits the laser in two. Either beam can win.
+- **Wormhole pair**: light enters one mouth and leaves the other, still heading the same way.
+- **Fixed mirrors**: gold-framed mirrors on the board that bounce the beam, for bank shots. The aiming line keeps going past them.
+- **Fading light + relay**: the light fades after a set distance. Passing through the gold relay ring gives it its full range back. The solver only accepts solutions that need the relay.
+- **Twin laser stations**: a second station fires at the same moment. Any beam that reaches the beacon wins. Some days both stations can be solved, some days only one.
+
+The all-time leaderboard adds up every day's points. There is also a board for today.
 
 Every shot is checked on the server: it re-runs the physics, counts the shot, and computes the score, so the browser cannot claim a result.
 

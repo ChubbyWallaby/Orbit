@@ -2,7 +2,8 @@
 // Everything happens in the x/z plane; the 3D scene renders it at y = 0.
 
 export type Vec = { x: number; z: number };
-export type BodyKind = 'giant' | 'planet' | 'blackhole' | 'sun' | 'moonlet';
+/** A `repulsor` has negative mass: it pushes light away instead of pulling it in. */
+export type BodyKind = 'giant' | 'planet' | 'blackhole' | 'sun' | 'moonlet' | 'repulsor';
 /** `orbit` (moonlets only) is the circle the moon sits on around its planet, drawn as a guide. */
 export type Body = Vec & { r: number; m: number; name: string; kind: BodyKind; style?: string; ring?: boolean; orbit?: Vec & { r: number } };
 /** `id` is the rock's index in the original level, kept when destroyed rocks are removed. */
@@ -11,16 +12,29 @@ export type Rock = Vec & { r: number; id?: number };
 export type Splitter = Vec & { angle: number; half: number };
 /** Light entering one mouth leaves the other with the same direction. */
 export type Wormhole = { a: Vec; b: Vec; r: number };
+/** A mirror bolted to the board. Same shape as a splitter, but it reflects all the light. */
+export type FixedMirror = Vec & { angle: number; half: number };
+/** Light passing through a relay ring gets its full range back. */
+export type Relay = Vec & { r: number };
+
+export type Emitter = Vec & { dir: number; style?: string }; // dir in radians
 
 export type Level = {
   day: string; // UTC date, YYYY-MM-DD
   number: number; // puzzle number since launch
-  emitter: Vec & { dir: number; style?: string }; // dir in radians
+  emitter: Emitter;
+  /** More laser stations firing at the same moment. Any beam that reaches the beacon wins. */
+  extraEmitters?: Emitter[];
   target: Vec & { r: number };
   bodies: Body[];
   rocks: Rock[];
   splitters: Splitter[];
   wormholes: Wormhole[];
+  /** Optional, added later: older levels do not have these. */
+  mirrors?: FixedMirror[];
+  relays?: Relay[];
+  /** How far light travels before it fades out. Missing means it never fades. */
+  range?: number;
   moon: { r: number; m: number; name: string; start: Vec; startAngle: number; style?: string };
   mirrorHalf: number;
   bounds: { x: number; z: number };
@@ -34,17 +48,22 @@ export type Placement = {
 };
 
 /** `jump` marks the first point after a wormhole exit (no line is drawn into it). */
-export type TracePoint = Vec & { bounce?: boolean; jump?: boolean };
-export type Outcome = 'hit' | 'absorbed' | 'rock' | 'lost';
+/** `relay` marks where a relay ring refilled the beam; `fixed` marks a bounce off a fixed mirror. */
+export type TracePoint = Vec & { bounce?: boolean; fixed?: boolean; jump?: boolean; relay?: boolean };
+export type Outcome = 'hit' | 'absorbed' | 'rock' | 'lost' | 'faded';
 export type Ray = {
   pts: TracePoint[];
   /** distance travelled by light before this ray started (for animation and preview) */
   start: number;
   /** cumulative distance at each point, starting at `start` */
   dist: number[];
+  /** remaining beam strength (0..1) at each point; all 1 when the level's light never fades */
+  fuel: number[];
   result: Outcome;
   hitName: string | null;
   bounces: number;
+  /** which laser station this light came from: 0 is the main one, 1+ are extraEmitters */
+  source: number;
   /** id of the asteroid that stopped this ray, if any */
   rockId?: number;
 };
@@ -85,7 +104,7 @@ function cross(p: Vec, q: Vec, s: Segment): Vec | null {
   return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? { x: p.x + d1x * t, z: p.z + d1z * t } : null;
 }
 
-type Pending = { p: Vec; v: Vec; start: number; ignore: string | null };
+type Pending = { p: Vec; v: Vec; start: number; ignore: string | null; fuel: number; source: number };
 
 export function trace(level: Level, placement: Placement, maxSteps = 3600): TraceResult {
   const bodies: Body[] = [
@@ -94,16 +113,21 @@ export function trace(level: Level, placement: Placement, maxSteps = 3600): Trac
   ];
   const mirrors: Segment[] = [mirrorSegment(placement.moon, placement.angle, level.moon.r + MOON_MIRROR_OFFSET, level.mirrorHalf)];
   if (placement.satellite) mirrors.push(mirrorSegment(placement.satellite, placement.satellite.angle, 0, level.mirrorHalf));
+  const playerMirrors = mirrors.length; // mirrors after these are fixed to the board
+  for (const m of level.mirrors ?? []) mirrors.push(mirrorSegment(m, m.angle, 0, m.half));
+  const relays = level.relays ?? [];
+  const range = level.range && level.range > 0 ? level.range : Infinity;
   const splitters = (level.splitters ?? []).map((s) => mirrorSegment(s, s.angle, 0, s.half));
   const holes = level.wormholes ?? [];
 
-  const e = level.emitter;
-  const queue: Pending[] = [{
+  const queue: Pending[] = [level.emitter, ...(level.extraEmitters ?? [])].map((e, source) => ({
     p: { x: e.x + Math.cos(e.dir) * 1.4, z: e.z + Math.sin(e.dir) * 1.4 },
     v: { x: Math.cos(e.dir), z: Math.sin(e.dir) },
     start: 0,
     ignore: null,
-  }];
+    fuel: range,
+    source,
+  }));
   const rays: Ray[] = [];
   const dt = 0.05;
 
@@ -112,9 +136,13 @@ export function trace(level: Level, placement: Placement, maxSteps = 3600): Trac
     let p = { ...job.p };
     const v = { ...job.v };
     let travelled = job.start;
+    // fuel is the distance this ray can still travel before it fades out
+    let fuel = job.fuel;
+    const frac = () => (range === Infinity ? 1 : Math.max(0, fuel / range));
     const pts: TracePoint[] = [{ ...p }];
     const dist: number[] = [travelled];
-    const push = (pt: TracePoint) => { pts.push(pt); dist.push(travelled); };
+    const fuels: number[] = [frac()];
+    const push = (pt: TracePoint) => { pts.push(pt); dist.push(travelled); fuels.push(frac()); };
     let result: Outcome = 'lost';
     let hitName: string | null = null;
     let bounces = 0;
@@ -146,8 +174,9 @@ export function trace(level: Level, placement: Placement, maxSteps = 3600): Trac
         if (ignore === id) continue;
         const h = cross(p, q, mirrors[mi]);
         if (!h) continue;
-        travelled += Math.hypot(h.x - p.x, h.z - p.z);
-        push({ ...h, bounce: true });
+        const seg = Math.hypot(h.x - p.x, h.z - p.z);
+        travelled += seg; fuel -= seg;
+        push({ ...h, bounce: true, ...(mi >= playerMirrors ? { fixed: true } : {}) });
         const n = mirrors[mi].n, dot = v.x * n.x + v.z * n.z;
         v.x -= 2 * dot * n.x;
         v.z -= 2 * dot * n.z;
@@ -165,12 +194,13 @@ export function trace(level: Level, placement: Placement, maxSteps = 3600): Trac
         if (ignore === id) continue;
         const h = cross(p, q, splitters[si]);
         if (!h) continue;
-        travelled += Math.hypot(h.x - p.x, h.z - p.z);
+        const seg = Math.hypot(h.x - p.x, h.z - p.z);
+        travelled += seg; fuel -= seg;
         push({ ...h });
         const n = splitters[si].n, dot = v.x * n.x + v.z * n.z;
         const rv = { x: v.x - 2 * dot * n.x, z: v.z - 2 * dot * n.z };
         if (rays.length + queue.length + 1 < MAX_RAYS) {
-          queue.push({ p: { x: h.x + rv.x * 0.02, z: h.z + rv.z * 0.02 }, v: rv, start: travelled, ignore: id });
+          queue.push({ p: { x: h.x + rv.x * 0.02, z: h.z + rv.z * 0.02 }, v: rv, start: travelled, ignore: id, fuel, source: job.source });
         }
         p = { x: h.x + v.x * 0.02, z: h.z + v.z * 0.02 };
         ignore = id;
@@ -180,7 +210,20 @@ export function trace(level: Level, placement: Placement, maxSteps = 3600): Trac
       if (handled) continue;
 
       travelled += dt;
+      fuel -= dt;
       p = q;
+      if (fuel <= 0) {
+        result = 'faded';
+        push({ ...p });
+        break;
+      }
+
+      // relay rings give the beam its full range back
+      for (const R of relays) {
+        if (Math.hypot(p.x - R.x, p.z - R.z) >= R.r) continue;
+        if (fuel < range - 0.5) push({ ...p, relay: true });
+        fuel = range;
+      }
 
       // wormholes teleport
       for (let wi = 0; wi < holes.length && !handled; wi++) {
@@ -191,6 +234,7 @@ export function trace(level: Level, placement: Placement, maxSteps = 3600): Trac
           p = { x: to.x + v.x * (w.r + 0.15), z: to.z + v.z * (w.r + 0.15) };
           pts.push({ x: to.x, z: to.z, jump: true });
           dist.push(travelled);
+          fuels.push(frac());
           ignore = id === `w${wi}a` ? `w${wi}b` : `w${wi}a`;
           ignoreUntil = i + Math.ceil((w.r * 3) / dt);
           handled = true;
@@ -231,7 +275,7 @@ export function trace(level: Level, placement: Placement, maxSteps = 3600): Trac
       }
       if (Math.abs(p.x) > level.bounds.x + 6 || Math.abs(p.z) > level.bounds.z + 6) break;
     }
-    rays.push({ pts, start: job.start, dist, result, hitName, bounces, rockId });
+    rays.push({ pts, start: job.start, dist, fuel: fuels, result, hitName, bounces, source: job.source, rockId });
   }
 
   const winner = rays.find((r) => r.result === 'hit');
@@ -252,11 +296,13 @@ export function constrainMoon(level: Level, pos: Vec, radius = level.moon.r): Ve
   let z = Math.max(-level.bounds.z + 3, Math.min(level.bounds.z - 3, pos.z));
   const blockers = [
     ...level.bodies.map((B) => ({ x: B.x, z: B.z, r: B.r + radius + (B.kind === 'blackhole' ? 2.2 : 1.2) })),
-    { x: level.emitter.x, z: level.emitter.z, r: 4 },
+    ...[level.emitter, ...(level.extraEmitters ?? [])].map((E) => ({ x: E.x, z: E.z, r: 4 })),
     { x: level.target.x, z: level.target.z, r: level.target.r + radius + 1.6 },
     ...level.rocks.map((R) => ({ x: R.x, z: R.z, r: R.r + radius + 0.4 })),
     ...(level.splitters ?? []).map((S) => ({ x: S.x, z: S.z, r: S.half + radius + 0.4 })),
     ...(level.wormholes ?? []).flatMap((W) => [W.a, W.b].map((m) => ({ x: m.x, z: m.z, r: W.r + radius + 0.6 }))),
+    ...(level.mirrors ?? []).map((M) => ({ x: M.x, z: M.z, r: M.half + radius + 0.4 })),
+    ...(level.relays ?? []).map((R) => ({ x: R.x, z: R.z, r: R.r + radius + 0.4 })),
   ];
   for (let k = 0; k < 4; k++) {
     for (const B of blockers) {
@@ -277,11 +323,14 @@ export const SCANNER_BOOST = 1.2;
 
 /** How far (in light-travel distance from the emitter) the dashed aiming line reaches. */
 export function previewLimit(res: TraceResult, scanner: boolean): number {
-  // normally: 15 units, or just past the first mirror bounce if that comes sooner
-  const main = res.rays[0];
+  // normally: 15 units, or just past the first bounce off your own mirror if that comes sooner
+  // (fixed mirrors are part of the board, so the line keeps going past them)
   let limit = 15;
-  const firstBounce = main.pts.findIndex((p, i) => i > 0 && p.bounce);
-  if (firstBounce > 0) limit = Math.min(limit, main.dist[firstBounce] + 4.5);
+  for (const ray of res.rays) {
+    if (ray.start > 0) continue; // only beams straight from a station
+    const firstBounce = ray.pts.findIndex((p, i) => i > 0 && p.bounce && !p.fixed);
+    if (firstBounce > 0) limit = Math.min(limit, ray.dist[firstBounce] + 4.5);
+  }
   return scanner ? limit * SCANNER_BOOST : limit;
 }
 

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'vitest';
 import { previewLimit, trace, withDestroyed, type Level } from '@/game/engine';
-import { generateLevel, featureFor, FALLBACK_LEVEL, VARIETY_FROM, COMPLEX_FROM } from '@/game/generate';
+import { generateLevel, featuresFor, FALLBACK_LEVEL } from '@/game/generate';
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
 import { MemoryStore, setStoreForTests, nextStreak, liveStreak } from '@/server/store';
 import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, GameError } from '@/server/game';
@@ -35,7 +35,7 @@ describe('generator', () => {
       const day = new Date(Date.UTC(2026, 10, 10 + i)).toISOString().slice(0, 10);
       await new Promise((r) => setTimeout(r, 0)); // let the test runner breathe between heavy generations
       const g = await levelFor(day);
-      kinds.add(featureFor(day));
+      for (const f of featuresFor(day)) kinds.add(f);
       const start = trace(g.level, { moon: g.level.moon.start, angle: g.level.moon.startAngle });
       // the starting spot and the solution must both be accepted by the server
       expect(() => parsePlacement(g.level, { moon: g.level.moon.start, angle: g.level.moon.startAngle }, []), day).not.toThrow();
@@ -44,20 +44,14 @@ describe('generator', () => {
       const sol = trace(g.level, g.solution);
       expect(sol.result, day).toBe('hit');
       expect(sol.bounces, day).toBeGreaterThan(0);
+      expect(sol.rays.find((r) => r.result === 'hit')!.pts.some((p) => p.bounce && !p.fixed), day).toBe(true);
     }
-    expect([...kinds].sort()).toEqual(['blackhole', 'plain', 'splitter', 'wormhole']);
+    expect([...kinds].sort()).toEqual(['blackhole', 'mirrors', 'plain', 'relay', 'repulsor', 'splitter', 'twin', 'wormhole']);
   }, 240000);
 });
 
 describe('board variety', () => {
-  test('days before the variety launch keep their exact level', () => {
-    const g = generateLevel(DAY);
-    expect(DAY < VARIETY_FROM).toBe(true);
-    expect(g.level.emitter.style).toBeUndefined();
-    expect(g.level.moon).toMatchObject({ r: 1.6, m: 0.12 });
-    expect(g.level.mirrorHalf).toBe(1.5);
-  });
-  test('later days vary planets, gravity, stations, moons, mirrors and sides', () => {
+  test('days vary planets, gravity, stations, moons, mirrors and sides', () => {
     const seen = { giant: new Set<string>(), emitter: new Set<string>(), moon: new Set<string>(), side: new Set<string>(), mirror: new Set<string>() };
     for (let i = 1; i <= 15; i++) {
       const { level } = generateLevel(new Date(Date.UTC(2026, 10, 10 + i)).toISOString().slice(0, 10));
@@ -77,13 +71,7 @@ describe('board variety', () => {
 });
 
 describe('star systems', () => {
-  test('days before the system launch have no suns or moons', () => {
-    for (const day of ['2026-11-11', '2026-11-12']) {
-      expect(day < COMPLEX_FROM).toBe(true);
-      expect(generateLevel(day).level.bodies.some((b) => b.kind === 'sun' || b.kind === 'moonlet')).toBe(false);
-    }
-  });
-  test('later days always have at least two gravity bodies, and some have suns and moons', () => {
+  test('days always have at least two gravity bodies, and some have suns and moons', () => {
     let suns = 0, moons = 0;
     for (let i = 3; i <= 17; i++) {
       const day = new Date(Date.UTC(2026, 10, 10 + i)).toISOString().slice(0, 10);
@@ -134,12 +122,82 @@ describe('pieces', () => {
   });
 
 
+  test('fixed mirrors bounce the beam', () => {
+    // normal at 135° turns a beam heading +x towards +z
+    const level = bare({ target: { x: 0, z: 15, r: 1.5 }, mirrors: [{ x: 0, z: 0, angle: 135, half: 1.5 }] });
+    const res = trace(level, farMoon);
+    expect(res).toMatchObject({ result: 'hit', bounces: 1 });
+    expect(res.rays.length).toBe(1);
+  });
+
+  test('light fades after its range, and a relay ring recharges it', () => {
+    const faded = trace(bare({ range: 25 }), farMoon);
+    expect(faded.result).toBe('faded');
+    const f = faded.rays[0].fuel;
+    expect(f[0]).toBeGreaterThan(0.9);
+    expect(f[f.length - 1]).toBeLessThan(0.05);
+    const relayed = trace(bare({ range: 25, relays: [{ x: -2, z: 0, r: 1.2 }] }), farMoon);
+    expect(relayed.result).toBe('hit');
+    expect(relayed.rays[0].pts.some((p) => p.relay)).toBe(true);
+    // without a range set, light never fades
+    expect(trace(bare({}), farMoon).result).toBe('hit');
+  });
+
+  test('every laser station fires, and a beam from any of them can win', () => {
+    // the main station misses wide; a second station aims straight at the beacon
+    const level = bare({ emitter: { x: -20, z: 15, dir: 0 }, extraEmitters: [{ x: -20, z: 0, dir: 0 }] });
+    const res = trace(level, farMoon);
+    expect(res.rays.map((r) => r.source)).toEqual([0, 1]);
+    expect(res.rays[0].result).toBe('lost');
+    expect(res).toMatchObject({ result: 'hit' });
+  });
+
+  test('the aiming line keeps going past fixed mirrors', () => {
+    const level = bare({ target: { x: 0, z: 25, r: 1.5 }, mirrors: [{ x: -14, z: 0, angle: 135, half: 1.5 }] });
+    const res = trace(level, farMoon);
+    expect(res.rays[0].pts.some((p) => p.fixed)).toBe(true);
+    expect(previewLimit(res, false)).toBe(15);
+  });
+
+  test('repulsors push light away', () => {
+    // a repulsor just below the line pushes the beam up (+z), so it misses a beacon dead ahead
+    const level = bare({ bodies: [{ x: 0, z: -1.5, r: 0.8, m: -1, name: 'Aegis', kind: 'repulsor' }] });
+    const res = trace(level, farMoon);
+    expect(res.result).not.toBe('hit');
+    const end = res.rays[0].pts[res.rays[0].pts.length - 1];
+    expect(end.z).toBeGreaterThan(1.5);
+  });
+
   test('wormholes carry light to the other mouth', () => {
     const level = bare({ target: { x: 10, z: 12, r: 1.5 }, wormholes: [{ a: { x: -5, z: 0 }, b: { x: -5, z: 12 }, r: 1.1 }] });
     const res = trace(level, farMoon);
     expect(res.result).toBe('hit');
     expect(res.rays[0].pts.some((p) => p.jump)).toBe(true);
   });
+});
+
+describe('new pieces in daily levels', () => {
+  test('relays are needed, fixed mirrors take part, twin stations work, and some days have two pieces', () => {
+    let pairs = 0;
+    const seen = new Set<string>();
+    for (let i = 0; i < 30; i++) {
+      const day = new Date(Date.UTC(2026, 10, 14 + i)).toISOString().slice(0, 10);
+      const fs = featuresFor(day);
+      if (fs.length === 2) pairs++;
+      if (!fs.some((f) => f === 'relay' || f === 'mirrors' || f === 'twin')) continue;
+      const { level, solution } = generateLevel(day);
+      expect(trace(level, solution).result, day).toBe('hit');
+      if (level.relays?.length) {
+        seen.add('relay');
+        expect(level.range, day).toBeGreaterThan(0);
+        expect(trace({ ...level, relays: [] }, solution).result, day).not.toBe('hit');
+      }
+      if (level.mirrors?.length) seen.add('mirrors');
+      if (level.extraEmitters?.length) seen.add('twin');
+    }
+    expect(pairs).toBeGreaterThan(0);
+    expect([...seen].sort()).toEqual(['mirrors', 'relay', 'twin']);
+  }, 240000);
 });
 
 describe('aiming line', () => {
@@ -237,7 +295,7 @@ describe('server game', () => {
     const day = '2099-01-01';
     const level: Level = { ...FALLBACK_LEVEL(day), emitter: { x: -20, z: 0, dir: 0 }, target: { x: 20, z: 0, r: 1.5 }, bodies: [], splitters: [], wormholes: [], rocks: [{ x: 0, z: 0, r: 1 }] };
     const placement = { moon: { x: -25, z: 20 }, angle: 0 };
-    await store.setCached(`level:v3:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
+    await store.setCached(`level:v4:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
     await setName('e', 'Eve');
     expect((await shoot('e', placement, day)).result).toBe('rock'); // without the helper the rock survives
     expect((await shoot('e', placement, day)).result).toBe('rock');
@@ -251,7 +309,7 @@ describe('server game', () => {
     const day = '2099-01-02';
     const level: Level = { ...FALLBACK_LEVEL(day), emitter: { x: -20, z: 0, dir: 0 }, target: { x: 20, z: 0, r: 1.5 }, bodies: [], splitters: [], wormholes: [], rocks: [{ x: 0, z: 0, r: 1 }] };
     const placement = { moon: { x: -25, z: 20 }, angle: 0 };
-    await store.setCached(`level:v3:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
+    await store.setCached(`level:v4:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
     await setName('f', 'Fox');
     await applyHelper('f', 'energized', day);
     expect((await shoot('f', placement, day)).destroyed).toEqual([0]);

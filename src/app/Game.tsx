@@ -47,13 +47,42 @@ function conditions(level: Level): string | null {
   return parts.join(' · ');
 }
 
-/** What is special about today's level, if anything. */
-function todaysPiece(level: Level): { label: string; intro: string } | null {
+/** What is special about today's level: one entry per special piece. */
+function todaysPieces(level: Level): { label: string; intro: string }[] {
+  const out: { label: string; intro: string }[] = [];
   const bh = level.bodies.find((b) => b.kind === 'blackhole');
-  if (bh) return { label: `Black hole · ${bh.name}`, intro: `Today: black hole ${bh.name}. It bends light hard, and light that gets too close never comes back.` };
-  if (level.splitters?.length) return { label: 'Beam splitter', intro: 'Today: a beam splitter. It splits the laser in two. Either beam can light the beacon.' };
-  if (level.wormholes?.length) return { label: 'Wormhole pair', intro: 'Today: a wormhole pair. Light that enters one mouth leaves the other, still heading the same way.' };
-  return null;
+  if (bh) out.push({ label: `Black hole · ${bh.name}`, intro: `Black hole ${bh.name} bends light hard, and light that gets too close never comes back.` });
+  const rp = level.bodies.find((b) => b.kind === 'repulsor');
+  if (rp) out.push({ label: `Repulsor · ${rp.name}`, intro: `Repulsor ${rp.name} pushes light away instead of pulling it in.` });
+  const extra = level.extraEmitters?.length ?? 0;
+  if (extra) out.push({ label: `${extra + 1} laser stations`, intro: `${extra + 1} laser stations fire at once. Any beam that reaches the beacon wins, but not every station may have a way through.` });
+  if (level.splitters?.length) out.push({ label: 'Beam splitter', intro: 'A beam splitter splits the laser in two. Either beam can light the beacon.' });
+  if (level.wormholes?.length) out.push({ label: 'Wormhole pair', intro: 'Light that enters one wormhole mouth leaves the other, still heading the same way.' });
+  if (level.mirrors?.length) {
+    const n = level.mirrors.length;
+    out.push({ label: n === 1 ? 'Fixed mirror' : `${n} fixed mirrors`, intro: `${n === 1 ? 'A fixed mirror' : `${n} fixed mirrors`} (gold frames) bounce the beam too. Use them for bank shots.` });
+  }
+  if (level.relays?.length && level.range) {
+    out.push({ label: `Fading light · relay`, intro: `The light fades after ${Math.round(level.range)} units. Send it through the gold relay ring to recharge it.` });
+  }
+  return out;
+}
+
+function pieceIntro(level: Level): string | null {
+  const pieces = todaysPieces(level);
+  return pieces.length ? `Today: ${pieces.map((p) => p.intro).join(' ')}` : null;
+}
+
+/** Why a shot did not reach the beacon. */
+function missText(level: Level, result: TraceResult['result'], hitName: string | null): string {
+  if (result === 'absorbed') {
+    const kind = level.bodies.find((b) => b.name === hitName)?.kind;
+    const verb = kind === 'blackhole' ? 'Swallowed by black hole' : kind === 'sun' ? 'Burned up in the sun' : kind === 'repulsor' ? 'Scattered by repulsor' : 'Pulled into';
+    return `${verb} ${hitName}.`;
+  }
+  if (result === 'rock') return 'Blocked by the asteroid belt.';
+  if (result === 'faded') return 'The light faded out. Pass the relay ring to recharge it.';
+  return 'Lost in deep space.';
 }
 
 export default function Game() {
@@ -109,8 +138,8 @@ export default function Game() {
   useEffect(() => {
     api<TodayPayload>('/api/today').then((d) => {
       setData(d); setPlay(d.me.play); setName(d.me.name); setStreak(d.me.streak);
-      const piece = todaysPiece(d.level);
-      if (piece) setStatus({ text: piece.intro });
+      const intro = pieceIntro(d.level);
+      if (intro) setStatus({ text: intro });
       const p = loadPlacement(d.level);
       if (!d.me.play.helpers.includes('satellite')) p.satellite = null;
       setPlacement(p);
@@ -174,13 +203,7 @@ export default function Game() {
       if (res.result === 'hit') setStatus({ text: `Beacon lit! +${res.score} points.`, kind: 'good' });
       // with a beam splitter, one beam can destroy an asteroid while the other goes elsewhere
       else if (res.destroyed.length) setStatus({ text: `Asteroid destroyed! The way is clearer for your next shot.${tail}`, kind: 'bad' });
-      else if (res.result === 'absorbed') {
-        const kind = level.bodies.find((b) => b.name === res.hitName)?.kind;
-        const verb = kind === 'blackhole' ? 'Swallowed by black hole' : kind === 'sun' ? 'Burned up in the sun' : 'Pulled into';
-        setStatus({ text: `${verb} ${res.hitName}.${tail}`, kind: 'bad' });
-      }
-      else if (res.result === 'rock') setStatus({ text: `Blocked by the asteroid belt.${tail}`, kind: 'bad' });
-      else setStatus({ text: `Lost in deep space.${tail}`, kind: 'bad' });
+      else setStatus({ text: `${missText(level, res.result, res.hitName)}${tail}`, kind: 'bad' });
       if (res.status !== 'playing') {
         track('finished', { result: res.status, shots: res.play.shots.length, helpers: res.play.helpers.length, score: res.score });
         if (res.status === 'lost') setStatus({ text: 'Out of shots. The beacon stays dark today.', kind: 'bad' });
@@ -207,9 +230,7 @@ export default function Game() {
     beamFor.current = placement;
     if (preview.result === 'hit') setStatus({ text: 'Practice: beacon lit! This one doesn’t count.', kind: 'good' });
     else if (energized && preview.rocksHit.length) setStatus({ text: 'Practice: asteroid destroyed!', kind: 'bad' });
-    else if (preview.result === 'absorbed') setStatus({ text: `Practice: pulled into ${preview.hitName}.`, kind: 'bad' });
-    else if (preview.result === 'rock') setStatus({ text: 'Practice: blocked by the asteroid belt.', kind: 'bad' });
-    else setStatus({ text: 'Practice: lost in deep space.', kind: 'bad' });
+    else setStatus({ text: `Practice: ${missText(level, preview.result, preview.hitName)}`, kind: 'bad' });
     setBusy(false);
   };
 
@@ -256,7 +277,7 @@ export default function Game() {
       <header className="hud top">
         <div className="brand">
           <h1 className="wordmark">ORB<span>I</span>T</h1>
-          {level && todaysPiece(level) && <div className="meta piece">{todaysPiece(level)!.label}</div>}
+          {level && todaysPieces(level).length > 0 && <div className="meta piece">{todaysPieces(level).map((p) => p.label).join(' + ')}</div>}
           {level && conditions(level) && <div className="meta wrap">{conditions(level)}</div>}
           <div className="meta">{level ? `Daily #${level.number} · ${new Date(level.day + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })}` : 'Loading today’s puzzle…'}</div>
         </div>
