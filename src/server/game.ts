@@ -33,7 +33,7 @@ export function levelFor(day: string): Promise<Generated> {
   if (!g) {
     g = (async () => {
       const store = getStore();
-      const key = `level:v3:${day}`;
+      const key = `level:v4:${day}`;
       const hit = await store.getCached(key);
       if (hit) return JSON.parse(hit) as Generated;
       const fresh = generateLevel(day);

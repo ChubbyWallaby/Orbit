@@ -5,7 +5,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { constrainMoon, indexAt, MOON_MIRROR_OFFSET, SATELLITE_RADIUS, type Level, type Placement, type Ray, type TraceResult, type Vec } from './engine';
+import { constrainMoon, indexAt, MOON_MIRROR_OFFSET, SATELLITE_RADIUS, type Emitter, type Level, type Placement, type Ray, type TraceResult, type Vec } from './engine';
 
 const NOISE = `
 float h3(vec3 p){ p = fract(p*0.3183099+.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
@@ -18,6 +18,8 @@ const SUN = new THREE.Vector3(-0.6, 0.55, 0.45).normalize();
 const LASER = new THREE.Color(0xff4f6e);
 const BEACON = 0x5cf2c0;
 const MIRROR = 0xa9d8ff;
+const RELAY = 0xffc857;
+const REPULSOR = 0x9fe8ff;
 const hdr = (c: number, k: number) => new THREE.Color(c).multiplyScalar(k);
 
 type Drag = 'moon' | 'satellite';
@@ -93,9 +95,12 @@ function mirrorPanel(length: number) {
   return g;
 }
 
+/** Beam brightness for a remaining-strength fraction: fading light dims but stays visible. */
+const glowOf = (f: number) => 0.12 + 0.88 * Math.sqrt(Math.max(0, f));
+
 /** Two crossed ribbons per segment (12 indices each, so draw ranges map to point indices). */
-function beamGeometry(pts: (Vec & { jump?: boolean })[]) {
-  const w = 0.11, pos: number[] = [], idx: number[] = [];
+function beamGeometry(pts: (Vec & { jump?: boolean })[], fuel?: number[]) {
+  const w = 0.11, pos: number[] = [], idx: number[] = [], col: number[] = [];
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i];
     // a wormhole jump draws nothing: collapse the segment to a point
@@ -106,11 +111,14 @@ function beamGeometry(pts: (Vec & { jump?: boolean })[]) {
     for (const o of [[-dz * ww, 0, dx * ww], [0, ww, 0]]) {
       const base = pos.length / 3;
       pos.push(a.x - o[0], -o[1], a.z - o[2], a.x + o[0], o[1], a.z + o[2], b.x - o[0], -o[1], b.z - o[2], b.x + o[0], o[1], b.z + o[2]);
+      const ka = glowOf(fuel?.[i] ?? 1), kb = glowOf(fuel?.[i + 1] ?? 1);
+      col.push(ka, ka, ka, ka, ka, ka, kb, kb, kb, kb, kb, kb);
       idx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
     }
   }
   const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx);
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3)); g.setIndex(idx);
   return g;
 }
 
@@ -141,12 +149,12 @@ export class OrbitScene {
   private preview = new THREE.Group();
   private beams = new THREE.Group();
   private sparks: THREE.Mesh[] = [];
-  private beamMat = new THREE.MeshBasicMaterial({ color: LASER.clone().multiplyScalar(2.6), toneMapped: false, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
-  private previewMat = new THREE.LineDashedMaterial({ color: LASER.clone().multiplyScalar(1.4), dashSize: 0.45, gapSize: 0.35, transparent: true, opacity: 0.85, toneMapped: false });
+  private beamMat = new THREE.MeshBasicMaterial({ color: LASER.clone().multiplyScalar(2.6), vertexColors: true, toneMapped: false, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+  private previewMat = new THREE.LineDashedMaterial({ color: LASER.clone().multiplyScalar(1.4), vertexColors: true, dashSize: 0.45, gapSize: 0.35, transparent: true, opacity: 0.85, toneMapped: false });
   private flashes: { mesh: THREE.Mesh; t0: number }[] = [];
   private flashGeo = new THREE.SphereGeometry(1, 24, 16);
   private rockMat = new THREE.MeshStandardMaterial({ color: 0x6d6358, roughness: 1, flatShading: true });
-  private firing: { rays: Ray[]; meshes: THREE.Mesh[]; t0: number; dur: number; length: number; done: () => void } | null = null;
+  private firing: { rays: Ray[]; meshes: THREE.Mesh[]; relayHits: { p: Vec; d: number }[]; t0: number; dur: number; length: number; done: () => void } | null = null;
   private dragging: Drag | null = null;
   private dragOffset = new THREE.Vector2();
   private ray = new THREE.Raycaster();
@@ -276,11 +284,11 @@ export class OrbitScene {
     this.animated.push({ tick: (t) => { (grab.material as THREE.MeshBasicMaterial).opacity = this.locked ? 0.1 : 0.3 + Math.sin(t * 2.4 + 1) * 0.2; } });
   }
 
-  private buildEmitter(level: Level) {
-    const em = new THREE.Group(); em.position.set(level.emitter.x, 0, level.emitter.z); em.rotation.y = -level.emitter.dir;
+  private buildEmitter(e: Emitter) {
+    const em = new THREE.Group(); em.position.set(e.x, 0, e.z); em.rotation.y = -e.dir;
     const metal = new THREE.MeshStandardMaterial({ color: 0xb8bfcc, metalness: 0.85, roughness: 0.35 });
     const dark = new THREE.MeshStandardMaterial({ color: 0x2a2f3c, metalness: 0.6, roughness: 0.5 });
-    const style = level.emitter.style ?? 'station';
+    const style = e.style ?? 'station';
     if (style === 'dish') {
       // radio-telescope style dish on a truss, facing along the beam
       const dish = new THREE.Mesh(new THREE.SphereGeometry(1.5, 32, 16, 0, Math.PI * 2, 0, 0.9), new THREE.MeshStandardMaterial({ color: 0xdfe3ea, metalness: 0.5, roughness: 0.35, side: THREE.DoubleSide }));
@@ -349,6 +357,27 @@ export class OrbitScene {
     this.animated.push({ tick: (_t, dt) => { ball.rotation.y += dt * 0.25; } });
   }
 
+  /** A repulsor: a hot white-blue core that sends pressure waves outward. */
+  private buildRepulsor(grp: THREE.Group, r: number) {
+    const coreMat = new THREE.MeshBasicMaterial({ color: hdr(REPULSOR, 2.4), toneMapped: false });
+    const core = new THREE.Mesh(new THREE.IcosahedronGeometry(r * 0.75, 1), coreMat);
+    const shell = new THREE.Mesh(new THREE.IcosahedronGeometry(r, 0), new THREE.MeshBasicMaterial({ color: hdr(REPULSOR, 1.2), wireframe: true, toneMapped: false, transparent: true, opacity: 0.6 }));
+    grp.add(core, shell, new THREE.PointLight(REPULSOR, 6, 12, 2));
+    const waves = [0, 1, 2].map(() => {
+      const m = new THREE.Mesh(new THREE.RingGeometry(0.92, 1, 64), new THREE.MeshBasicMaterial({ color: hdr(REPULSOR, 1.6), toneMapped: false, transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending }));
+      m.rotation.x = -Math.PI / 2; grp.add(m); return m;
+    });
+    this.animated.push({ tick: (t, dt) => {
+      shell.rotation.y += dt * 0.8; shell.rotation.x += dt * 0.5;
+      core.scale.setScalar(1 + Math.sin(t * 5) * 0.08);
+      waves.forEach((w, i) => {
+        const k = (t * 0.45 + i / 3) % 1;
+        w.scale.setScalar(r * (1.2 + k * 4));
+        (w.material as THREE.MeshBasicMaterial).opacity = (1 - k) * 0.7;
+      });
+    } });
+  }
+
   private buildBlackHole(grp: THREE.Group, r: number) {
     const hole = new THREE.Mesh(new THREE.SphereGeometry(r, 48, 32), new THREE.MeshBasicMaterial({ color: 0x000000 }));
     const lens = new THREE.Mesh(new THREE.SphereGeometry(r * 1.9, 48, 32), new THREE.ShaderMaterial({
@@ -389,6 +418,7 @@ export class OrbitScene {
       if (b.kind === 'blackhole') { this.buildBlackHole(grp, b.r); g.add(grp); return; }
       if (b.kind === 'sun') { this.buildSun(grp, b.r); g.add(grp); return; }
       if (b.kind === 'moonlet') { this.buildMoonlet(g, grp, b); g.add(grp); return; }
+      if (b.kind === 'repulsor') { this.buildRepulsor(grp, b.r); g.add(grp); return; }
       const style = b.style ?? (b.kind === 'giant' ? 'amber' : 'blue');
       const mat = planetMaterial(style, i * 3.7 + b.r);
       const ball = new THREE.Mesh(new THREE.SphereGeometry(b.r, 96, 64), mat); ball.rotation.z = 0.12;
@@ -412,8 +442,8 @@ export class OrbitScene {
       this.animated.push({ tick: (t, dt) => { ball.rotation.y += dt * 0.05; mat.uniforms.uT.value = t; } });
     });
 
-    // emitter
-    g.add(this.buildEmitter(level));
+    // laser stations
+    for (const e of [level.emitter, ...(level.extraEmitters ?? [])]) g.add(this.buildEmitter(e));
 
     // beacon
     const bc = new THREE.Group(); bc.position.set(level.target.x, 0, level.target.z);
@@ -439,6 +469,34 @@ export class OrbitScene {
       const base = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.25, 0.4, 8), new THREE.MeshStandardMaterial({ color: 0x9aa3b5, metalness: 0.8, roughness: 0.3 })); base.position.y = -0.85;
       grp.add(crystal, edges, base); g.add(grp);
       this.animated.push({ tick: (t) => { (edges.material as THREE.LineBasicMaterial).color.copy(hdr(0xc9a2ff, 1.8 + Math.sin(t * 2) * 0.5)); } });
+    }
+
+    // fixed mirrors: like the moon's mirror, but bolted to a gold-trimmed post
+    for (const m of level.mirrors ?? []) {
+      const grp = new THREE.Group(); grp.position.set(m.x, 0, m.z); grp.rotation.y = (-m.angle * Math.PI) / 180;
+      const L = m.half * 2;
+      const glass = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.1, L), new THREE.MeshPhysicalMaterial({ color: 0xe6f2ff, metalness: 0.95, roughness: 0.05, clearcoat: 1, emissive: 0x2d5b80, emissiveIntensity: 0.5 }));
+      const frame = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(0.16, 1.14, L + 0.04)), new THREE.LineBasicMaterial({ color: hdr(0xffd37a, 1.8), toneMapped: false }));
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.3, 0.5, 8), new THREE.MeshStandardMaterial({ color: 0xb08a4a, metalness: 0.8, roughness: 0.35 })); post.position.y = -0.8;
+      grp.add(glass, frame, post); g.add(grp);
+    }
+
+    // relay rings: the beam passing through gets its full range back
+    for (const R of level.relays ?? []) {
+      const grp = new THREE.Group(); grp.position.set(R.x, 0, R.z);
+      const ringMat = new THREE.MeshBasicMaterial({ color: hdr(RELAY, 1.8), toneMapped: false });
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(R.r, 0.06, 10, 72), ringMat); ring.rotation.x = Math.PI / 2;
+      const inner = new THREE.Mesh(new THREE.TorusGeometry(R.r * 0.7, 0.03, 8, 64), new THREE.MeshBasicMaterial({ color: hdr(RELAY, 1.2), toneMapped: false }));
+      const nodes = new THREE.Group();
+      for (let i = 0; i < 3; i++) {
+        const n = new THREE.Mesh(new THREE.OctahedronGeometry(0.16, 0), new THREE.MeshBasicMaterial({ color: hdr(RELAY, 2.4), toneMapped: false }));
+        const a = (i / 3) * Math.PI * 2; n.position.set(Math.cos(a) * R.r, 0, Math.sin(a) * R.r); nodes.add(n);
+      }
+      grp.add(ring, inner, nodes, new THREE.PointLight(RELAY, 3, 8, 2)); g.add(grp);
+      this.animated.push({ tick: (t) => {
+        nodes.rotation.y = t * 0.9; inner.rotation.x = t * 0.7; inner.rotation.y = t * 0.4;
+        ringMat.color.copy(hdr(RELAY, 1.5 + Math.sin(t * 2.2) * 0.4));
+      } });
     }
 
     // wormholes
@@ -510,9 +568,9 @@ export class OrbitScene {
     let i = 0;
     const put = (x: number, z: number) => {
       let d = 0; for (const B of masses) { const dx = x - B.x, dz = z - B.z; d += 15 * B.m / Math.sqrt(dx * dx + dz * dz + 5); }
-      const y = Math.max(-14, -1.4 - d); // suns dig deep wells: keep them on screen
+      const y = Math.min(-0.5, Math.max(-14, -1.4 - d)); // suns dig deep wells, repulsors raise small hills
       this.gridPos[i * 3] = x; this.gridPos[i * 3 + 1] = y; this.gridPos[i * 3 + 2] = z;
-      const edge = Math.max(Math.abs(x) / GX, Math.abs(z) / GZ), f = Math.max(0, 1 - edge * edge) * 0.2, deep = Math.min(1, d / 5);
+      const edge = Math.max(Math.abs(x) / GX, Math.abs(z) / GZ), f = Math.max(0, 1 - edge * edge) * 0.2, deep = Math.max(-0.6, Math.min(1, d / 5));
       this.gridCol[i * 3] = f * (0.35 + 0.5 * deep); this.gridCol[i * 3 + 1] = f * (0.42 + 0.1 * deep); this.gridCol[i * 3 + 2] = f * (0.85 - 0.2 * deep);
       i++;
     };
@@ -548,17 +606,22 @@ export class OrbitScene {
       const last = indexAt(ray, limit);
       if (last < 1) continue;
       let run: THREE.Vector3[] = [];
+      let cols: number[] = [];
       const flush = () => {
         if (run.length > 1) {
-          const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(run), this.previewMat);
+          const geo = new THREE.BufferGeometry().setFromPoints(run);
+          geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+          const line = new THREE.Line(geo, this.previewMat);
           line.computeLineDistances(); this.preview.add(line);
         }
-        run = [];
+        run = []; cols = [];
       };
       for (let i = 0; i <= last; i++) {
         const p = ray.pts[i];
         if (p.jump) flush();
         run.push(new THREE.Vector3(p.x, 0, p.z));
+        const k = glowOf(ray.fuel?.[i] ?? 1);
+        cols.push(k, k, k);
       }
       flush();
     }
@@ -595,25 +658,27 @@ export class OrbitScene {
 
   showBeam(res: TraceResult) {
     this.clearBeam();
-    for (const ray of res.rays) this.beams.add(new THREE.Mesh(beamGeometry(ray.pts), this.beamMat));
+    for (const ray of res.rays) this.beams.add(new THREE.Mesh(beamGeometry(ray.pts, ray.fuel), this.beamMat));
   }
 
   /** Animates a shot. With `explodeRocks` (energized laser), asteroids the beam hits burst apart. */
   fire(res: TraceResult, explodeRocks = false): Promise<void> {
     this.clearBeam();
     const meshes = res.rays.map((ray) => {
-      const m = new THREE.Mesh(beamGeometry(ray.pts), this.beamMat);
+      const m = new THREE.Mesh(beamGeometry(ray.pts, ray.fuel), this.beamMat);
       m.geometry.setDrawRange(0, 0); this.beams.add(m);
       const spark = new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 12), new THREE.MeshBasicMaterial({ color: hdr(0xffd0d8, 4), toneMapped: false }));
       spark.visible = false; this.beams.add(spark); this.sparks.push(spark);
       return m;
     });
     const length = Math.max(...res.rays.map((r) => r.dist[r.dist.length - 1]));
+    // relay rings flash as the beam passes through them
+    const relayHits = res.rays.flatMap((ray) => ray.pts.flatMap((p, i) => (p.relay ? [{ p, d: ray.dist[i] }] : [])));
     return new Promise((done) => {
-      this.firing = { rays: res.rays, meshes, t0: performance.now(), length, dur: this.reduceMotion ? 200 : Math.min(3000, 500 + length * 28), done: () => {
+      this.firing = { rays: res.rays, meshes, relayHits, t0: performance.now(), length, dur: this.reduceMotion ? 200 : Math.min(3000, 500 + length * 28), done: () => {
         for (const ray of res.rays) {
           const last = ray.pts[ray.pts.length - 1];
-          if (ray.result === 'lost') continue;
+          if (ray.result === 'lost' || ray.result === 'faded') continue; // light that fades or flies off makes no flash
           this.flashAt(last, ray.result === 'hit' ? BEACON : ray.result === 'rock' ? 0xff9a6e : 0xff4f6e);
           if (explodeRocks && ray.rockId !== undefined && this.level) {
             const rock = this.level.rocks.find((r, i) => (r.id ?? i) === ray.rockId);
@@ -682,6 +747,7 @@ export class OrbitScene {
     for (const a of this.animated) a.tick(t, this.reduceMotion ? dt * 0.15 : dt);
     if (this.firing) {
       const F = this.firing, k = Math.max(0, Math.min(1, (now - F.t0) / F.dur)), d = k * F.length;
+      F.relayHits = F.relayHits.filter((h) => { if (h.d > d) return true; this.flashAt(h.p, RELAY); return false; });
       F.rays.forEach((ray, i) => {
         const at = indexAt(ray, d), spark = this.sparks[i];
         F.meshes[i].geometry.setDrawRange(0, Math.max(0, at) * 12);
