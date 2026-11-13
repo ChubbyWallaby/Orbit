@@ -5,7 +5,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { constrainMoon, indexAt, MOON_MIRROR_OFFSET, SATELLITE_RADIUS, type Emitter, type Level, type Placement, type Ray, type TraceResult, type Vec } from './engine';
+import { bodiesAt, constrainMoon, indexAt, orbitClock, MOON_MIRROR_OFFSET, SATELLITE_RADIUS, type Emitter, type Level, type Placement, type Ray, type TraceResult, type Vec } from './engine';
 
 const NOISE = `
 float h3(vec3 p){ p = fract(p*0.3183099+.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
@@ -52,6 +52,12 @@ function planetMaterial(style: string, seed: number) {
         float b = sin(lat*(18.0+uSeed*0.4) + warp*4.0) * 0.5 + 0.5;
         float b2 = sin(lat*57.0 + warp*7.0) * 0.5 + 0.5;
         vec3 c = mix(${dark}, ${light}, b); c = mix(c, ${accent}, b2*0.45);
+        // a swirling storm fixed to the surface, so the planet's spin is easy to see
+        float sa = uSeed * 2.3; vec3 sc = normalize(vec3(cos(sa), sin(uSeed) * 0.45, sin(sa)));
+        vec3 sd = p - sc; float storm = exp(-(sd.x*sd.x + sd.z*sd.z) * 9.0 - sd.y*sd.y * 30.0);
+        float swirl = fbm(sd * 9.0 + vec3(uSeed));
+        c = mix(c, mix(${accent}, ${light}, swirl), smoothstep(0.25, 0.75, storm) * 0.85);
+        c = mix(c, ${dark}, smoothstep(0.05, 0.25, storm) * (1.0 - smoothstep(0.25, 0.5, storm)) * 0.5);
         c = mix(c, ${poles}, smoothstep(0.75,1.0,abs(lat))*0.6);
         float diff = clamp(dot(vN, uSun), 0.0, 1.0);
         vec3 V = normalize(cameraPosition - vW);
@@ -132,6 +138,11 @@ export class OrbitScene {
   private level: Level | null = null;
   private levelGroup = new THREE.Group();
   private animated: { tick: (t: number, dt: number) => void }[] = [];
+  /** moonlet groups that go round their planet, by index into level.bodies */
+  private orbiters: { grp: THREE.Group; i: number }[] = [];
+  /** orbit time the moons are frozen at (while a shot's beam is on screen), or null to follow the clock */
+  private orbitHold: number | null = null;
+  private gridAt = 0;
   private moon = new THREE.Group();
   private moonMirror = new THREE.Group();
   private moonPick = new THREE.Mesh();
@@ -268,7 +279,7 @@ export class OrbitScene {
     const panel = mirrorPanel(level.mirrorHalf * 2); panel.position.x = r + MOON_MIRROR_OFFSET;
     this.moonMirror.add(panel);
     this.moon.add(ball, grab, this.moonPick, this.moonMirror);
-    this.animated.push({ tick: (t, dt) => { ball.rotation.y += dt * 0.12; (grab.material as THREE.MeshBasicMaterial).opacity = this.locked ? 0.12 : 0.35 + Math.sin(t * 2.4) * 0.2; } });
+    this.animated.push({ tick: (t, dt) => { ball.rotation.y += dt * 0.35; (grab.material as THREE.MeshBasicMaterial).opacity = this.locked ? 0.12 : 0.35 + Math.sin(t * 2.4) * 0.2; } });
   }
 
   private buildSatellite(level: Level) {
@@ -340,11 +351,12 @@ export class OrbitScene {
     }));
     const light = new THREE.PointLight(0xffc27a, 60, 45, 1.6);
     grp.add(ball, corona, light);
-    this.animated.push({ tick: (t, dt) => { surface.uniforms.uT.value = t; ball.rotation.y += dt * 0.03; light.intensity = 55 + Math.sin(t * 1.3) * 6; } });
+    this.animated.push({ tick: (t, dt) => { surface.uniforms.uT.value = t; ball.rotation.y += dt * 0.08; light.intensity = 55 + Math.sin(t * 1.3) * 6; } });
   }
 
   /** A small moon sitting on a faint orbit ring around its planet. */
-  private buildMoonlet(g: THREE.Group, grp: THREE.Group, b: { r: number; orbit?: Vec & { r: number } }) {
+  private buildMoonlet(g: THREE.Group, grp: THREE.Group, b: { r: number; orbit?: Vec & { r: number; laps?: number } }, i: number) {
+    if (b.orbit?.laps) this.orbiters.push({ grp, i });
     const tex = craterTexture();
     const ball = new THREE.Mesh(new THREE.SphereGeometry(b.r, 32, 24), new THREE.MeshStandardMaterial({ map: tex, bumpMap: tex, bumpScale: 0.03, roughness: 0.95, color: 0xd8d2c8 }));
     grp.add(ball);
@@ -354,7 +366,7 @@ export class OrbitScene {
       const ring = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineDashedMaterial({ color: 0x9fb0d8, dashSize: 0.35, gapSize: 0.45, transparent: true, opacity: 0.4, depthWrite: false }));
       ring.computeLineDistances(); g.add(ring);
     }
-    this.animated.push({ tick: (_t, dt) => { ball.rotation.y += dt * 0.25; } });
+    this.animated.push({ tick: (_t, dt) => { ball.rotation.y += dt * 0.5; } });
   }
 
   /** A repulsor: a hot white-blue core that sends pressure waves outward. */
@@ -407,6 +419,7 @@ export class OrbitScene {
     this.level = level;
     this.levelGroup.clear();
     this.animated = [];
+    this.orbiters = [];
     this.buildMoon(level);
     this.buildSatellite(level);
     this.moon.visible = true;
@@ -417,13 +430,17 @@ export class OrbitScene {
       const grp = new THREE.Group(); grp.position.set(b.x, 0, b.z);
       if (b.kind === 'blackhole') { this.buildBlackHole(grp, b.r); g.add(grp); return; }
       if (b.kind === 'sun') { this.buildSun(grp, b.r); g.add(grp); return; }
-      if (b.kind === 'moonlet') { this.buildMoonlet(g, grp, b); g.add(grp); return; }
+      if (b.kind === 'moonlet') { this.buildMoonlet(g, grp, b, i); g.add(grp); return; }
       if (b.kind === 'repulsor') { this.buildRepulsor(grp, b.r); g.add(grp); return; }
       const style = b.style ?? (b.kind === 'giant' ? 'amber' : 'blue');
       const mat = planetMaterial(style, i * 3.7 + b.r);
-      const ball = new THREE.Mesh(new THREE.SphereGeometry(b.r, 96, 64), mat); ball.rotation.z = 0.12;
+      const ball = new THREE.Mesh(new THREE.SphereGeometry(b.r, 96, 64), mat);
+      // spin about a tilted axis: the tilt lives on a parent so the spin stays about the planet's own pole
+      const axis = new THREE.Group(); axis.rotation.z = 0.1 + ((i * 0.37) % 0.25); axis.add(ball);
+      ball.rotation.y = i * 1.9;
+      const spin = (0.22 + ((i * 0.61) % 0.2)) * (b.kind === 'giant' ? 1.3 : 1) * (i % 3 === 2 ? -1 : 1);
       const halo = (PALETTES[style] ?? PALETTES.amber).halo;
-      grp.add(ball, new THREE.Mesh(new THREE.SphereGeometry(b.r * 1.12, 64, 48), haloMaterial(new THREE.Color(...halo))));
+      grp.add(axis, new THREE.Mesh(new THREE.SphereGeometry(b.r * 1.12, 64, 48), haloMaterial(new THREE.Color(...halo))));
       if (b.kind === 'giant' && b.ring !== false) {
         const ring = new THREE.Mesh(new THREE.RingGeometry(b.r * 1.3, b.r * 2.15, 160, 1), new THREE.ShaderMaterial({
           transparent: true, side: THREE.DoubleSide, depthWrite: false,
@@ -439,7 +456,7 @@ export class OrbitScene {
         ring.rotation.x = -Math.PI / 2 + 0.42; ring.rotation.y = 0.25; grp.add(ring);
       }
       g.add(grp);
-      this.animated.push({ tick: (t, dt) => { ball.rotation.y += dt * 0.05; mat.uniforms.uT.value = t; } });
+      this.animated.push({ tick: (t, dt) => { ball.rotation.y += dt * spin; mat.uniforms.uT.value = t; } });
     });
 
     // laser stations
@@ -564,7 +581,7 @@ export class OrbitScene {
 
   private updateGrid(moon: Vec) {
     const level = this.level!; const { LINES, SEG } = this.grid.userData; const GX = level.bounds.x, GZ = level.bounds.z;
-    const masses = [...level.bodies.map((b) => ({ x: b.x, z: b.z, m: b.m })), { x: moon.x, z: moon.z, m: level.moon.m }];
+    const masses = [...bodiesAt(level, this.orbitTime()).map((b) => ({ x: b.x, z: b.z, m: b.m })), { x: moon.x, z: moon.z, m: level.moon.m }];
     let i = 0;
     const put = (x: number, z: number) => {
       let d = 0; for (const B of masses) { const dx = x - B.x, dz = z - B.z; d += 15 * B.m / Math.sqrt(dx * dx + dz * dz + 5); }
@@ -584,6 +601,15 @@ export class OrbitScene {
     const geo = this.grid.geometry;
     geo.attributes.position.needsUpdate = true; geo.attributes.color.needsUpdate = true; geo.computeBoundingSphere();
   }
+
+  /** The orbit time on screen: the shared clock, or the moment a shot was fired while its beam shows. */
+  orbitTime(): number {
+    if (!this.level) return 0;
+    return this.orbitHold ?? orbitClock(this.level, Date.now(), this.reduceMotion ? 0.5 : 1);
+  }
+
+  /** Freezes the orbiting moons at orbit time `t` (null lets them move again). */
+  holdOrbits(t: number | null) { this.orbitHold = t; }
 
   setPlacement(p: Placement) {
     const movedMoon = p.moon.x !== this.moonPos.x || p.moon.z !== this.moonPos.z;
@@ -745,6 +771,12 @@ export class OrbitScene {
   private tick = (now: number) => {
     const dt = Math.min(this.clock.getDelta(), 0.05), t = this.clock.elapsedTime * (this.reduceMotion ? 0.15 : 1);
     for (const a of this.animated) a.tick(t, this.reduceMotion ? dt * 0.15 : dt);
+    if (this.level && this.orbiters.length) {
+      const bodies = bodiesAt(this.level, this.orbitTime());
+      for (const o of this.orbiters) o.grp.position.set(bodies[o.i].x, 0, bodies[o.i].z);
+      // the gravity grid follows the moons a few times a second (they are light, so it barely moves)
+      if (now - this.gridAt > 250 && Number.isFinite(this.moonPos.x)) { this.gridAt = now; this.updateGrid(this.moonPos); }
+    }
     if (this.firing) {
       const F = this.firing, k = Math.max(0, Math.min(1, (now - F.t0) / F.dur)), d = k * F.length;
       F.relayHits = F.relayHits.filter((h) => { if (h.d > d) return true; this.flashAt(h.p, RELAY); return false; });

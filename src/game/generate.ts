@@ -430,6 +430,41 @@ const hasFeature = (level: Level, f: Feature): boolean => {
   }
 };
 
+/** Every orbiting moon is back at its start after this many seconds. */
+export const ORBIT_PERIOD = 240;
+
+/**
+ * Sets the moons going round their planets, once a level is solved. Their speed comes from its own
+ * random stream and orbit time 0 is the board the solver checked, so the puzzle itself is unchanged.
+ * A planet's moons share one orbit, so they turn together (40 to 80 seconds a lap, either way).
+ * A planet keeps still moons if their orbit would cross the solution or the moon's start, or if
+ * the start could then win on its own at some moment.
+ */
+function addOrbits(day: string, level: Level, solution: Placement) {
+  const r = rng(hash(`${day}:orbits`));
+  const systems = new Map<string, Body[]>();
+  for (const b of level.bodies) {
+    if (b.kind !== 'moonlet' || !b.orbit) continue;
+    const key = `${b.orbit.x},${b.orbit.z}`;
+    systems.set(key, [...(systems.get(key) ?? []), b]);
+  }
+  if (!systems.size) return;
+  level.orbitPeriod = ORBIT_PERIOD;
+  const legal = (p: Vec) => dist(constrainMoon(level, p), p) <= 0.005;
+  const moments = Array.from({ length: 16 }, (_, i) => (i * ORBIT_PERIOD) / 16);
+  for (const moons of systems.values()) {
+    const laps = (3 + Math.floor(r() * 4)) * (r() < 0.5 ? -1 : 1);
+    for (const m of moons) m.orbit!.laps = laps;
+    const c = constrainMoon(level, level.moon.start);
+    const start = { x: round(c.x), z: round(c.z) };
+    const ok = legal(solution.moon) && legal(start) &&
+      moments.every((t) => trace(level, { moon: start, angle: level.moon.startAngle, t }).result !== 'hit');
+    if (ok) level.moon.start = start;
+    else for (const m of moons) delete m.orbit!.laps;
+  }
+  if (!level.bodies.some((b) => b.orbit?.laps)) delete level.orbitPeriod;
+}
+
 export function generateLevel(day: string): Generated {
   const features = featuresFor(day);
   for (let attempt = 0; attempt < 80; attempt++) {
@@ -440,6 +475,7 @@ export function generateLevel(day: string): Generated {
     // every board has at least two gravity bodies (giant or sun, plus a planet)
     if (!level.bodies.some((b) => b.kind === 'planet')) continue;
     const ok = validate(level);
+    if (ok) addOrbits(day, level, ok.solution);
     if (ok) return { level, solution: ok.solution, solutions: ok.solutions, solvable: ok.solvable, attempts: attempt + 1 };
   }
   return { level: FALLBACK_LEVEL(day), solution: { moon: { x: 10, z: 3 }, angle: 230 }, solutions: 0, attempts: 80 };

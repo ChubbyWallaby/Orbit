@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { constrainMoon, previewLimit, trace, withDestroyed, SATELLITE_RADIUS, type Level, type Placement, type TraceResult, type Vec } from '@/game/engine';
+import { constrainMoon, previewLimit, trace, orbitClock, withDestroyed, SATELLITE_RADIUS, type Level, type Placement, type TraceResult, type Vec } from '@/game/engine';
 import { HELPER_ORDER, HELPERS, MAX_SHOTS, msUntilNextPuzzle, scoreFor, shareText, type HelperId } from '@/game/rules';
 import type { OrbitScene } from '@/game/scene';
 import type { TodayPayload } from '@/server/game';
@@ -26,7 +26,16 @@ function loadPlacement(level: Level): Placement {
     const raw = localStorage.getItem(placementKey(level.day));
     if (raw) {
       const p = JSON.parse(raw) as Placement;
-      if (p?.moon && Number.isFinite(p.moon.x) && Number.isFinite(p.angle)) return p;
+      if (p?.moon && Number.isFinite(p.moon.x) && Number.isFinite(p.angle)) {
+        // a spot saved before the level changed (e.g. moons started orbiting) may no longer be allowed
+        const off = (q: Vec, r?: number) => { const c = constrainMoon(level, q, r); return Math.hypot(c.x - q.x, c.z - q.z) > 0.01; };
+        if (off(p.moon)) p.moon = { ...level.moon.start };
+        if (p.satellite && off(p.satellite, SATELLITE_RADIUS)) {
+          const c = constrainMoon(level, p.satellite, SATELLITE_RADIUS);
+          p.satellite = { ...p.satellite, x: Math.round(c.x * 100) / 100, z: Math.round(c.z * 100) / 100 };
+        }
+        return p;
+      }
     }
   } catch { /* storage unavailable */ }
   return { moon: { ...level.moon.start }, angle: level.moon.startAngle, satellite: null };
@@ -43,8 +52,9 @@ function conditions(level: Level): string | null {
   const parts = [names[giant.style] ?? 'Giant', gravity];
   const planets = level.bodies.filter((b) => b.kind === 'planet').length;
   const moons = level.bodies.filter((b) => b.kind === 'moonlet').length;
+  const orbiting = level.bodies.some((b) => b.orbit?.laps);
   if (planets) parts.push(`${planets} ${planets === 1 ? 'planet' : 'planets'}`);
-  if (moons) parts.push(`${moons} ${moons === 1 ? 'moon' : 'moons'}`);
+  if (moons) parts.push(`${moons} ${orbiting ? 'orbiting ' : ''}${moons === 1 ? 'moon' : 'moons'}`);
   if (level.mirrorHalf < 1.35) parts.push('small mirror');
   else if (level.mirrorHalf > 1.65) parts.push('wide mirror');
   return parts.join(' · ');
@@ -110,6 +120,9 @@ export default function Game() {
   const [practice, setPractice] = useState(false);
   // the placement the beam on screen was fired from; moving anything clears that beam
   const beamFor = useRef<Placement | null>(null);
+  // orbit clock for the aiming line, and the moment the moons are frozen at while a shot's beam shows
+  const [orbitT, setOrbitT] = useState(0);
+  const [heldT, setHeldT] = useState<number | null>(null);
   const [status, setStatus] = useState<Status>({ text: START_TEXT });
   const pendingFire = useRef(false);
 
@@ -143,8 +156,10 @@ export default function Game() {
       setData(d); setPlay(d.me.play); setName(d.me.name); setStreak(d.me.streak);
       const intro = pieceIntro(d.level);
       if (intro) setStatus({ text: intro });
-      const p = loadPlacement(d.level);
+      const { t, ...p } = loadPlacement(d.level);
       if (!d.me.play.helpers.includes('satellite')) p.satellite = null;
+      // keep the moons where the last shot of a finished day found them
+      if (d.me.play.status !== 'playing') setHeldT(t ?? 0);
       setPlacement(p);
       if (!d.me.name) setNameOpen(true);
       if (d.me.play.status !== 'playing') {
@@ -165,7 +180,26 @@ export default function Game() {
     s.setLevel(level); s.frame();
   }, [sceneReady, level]);
 
-  const preview: TraceResult | null = useMemo(() => (level && placement ? trace(withDestroyed(level, destroyed), placement) : null), [level, placement, destroyed]);
+  const orbitNow = heldT ?? orbitT;
+  const preview: TraceResult | null = useMemo(() => (level && placement ? trace(withDestroyed(level, destroyed), { ...placement, t: orbitNow }) : null), [level, placement, destroyed, orbitNow]);
+
+  // orbiting moons: refresh the aiming line as they move, unless they are frozen for a beam on screen
+  useEffect(() => {
+    if (!level?.orbitPeriod || heldT !== null) return;
+    const tick = () => setOrbitT(sceneRef.current?.orbitTime() ?? orbitClock(level, Date.now()));
+    tick();
+    const id = setInterval(tick, 100);
+    return () => clearInterval(id);
+  }, [level, heldT, sceneReady]);
+  useEffect(() => { sceneRef.current?.holdOrbits(heldT); }, [sceneReady, heldT]);
+  // moving anything clears the last shot's beam, so the moons can move again
+  useEffect(() => {
+    if (heldT !== null && canAim && !busy && beamFor.current !== placement) setHeldT(null);
+  }, [heldT, canAim, busy, placement]);
+  useEffect(() => {
+    if (!level || !placement) return;
+    try { localStorage.setItem(placementKey(level.day), JSON.stringify({ ...placement, t: heldT ?? undefined })); } catch { /* ignore */ }
+  }, [level, placement, heldT]);
 
   useEffect(() => {
     const s = sceneRef.current;
@@ -183,7 +217,6 @@ export default function Game() {
         s.setPreview(beamFor.current ? null : preview, previewLimit(preview, helpers.includes('scanner')));
       }
     }
-    try { localStorage.setItem(placementKey(level.day), JSON.stringify(placement)); } catch { /* ignore */ }
   }, [sceneReady, level, placement, preview, helpers, canAim, busy, play.status]);
 
   useEffect(() => { sceneRef.current?.setDestroyed(destroyed); }, [sceneReady, level, destroyed]);
@@ -195,9 +228,13 @@ export default function Game() {
     setStatus({ text: 'Beam away…' });
     const s = sceneRef.current;
     s?.setPreview(null, 0); s?.clearBeam();
+    // the moons freeze where they are when you fire, and the server traces the shot at that moment
+    const t = s?.orbitTime() ?? 0;
+    const shot: Placement = level.orbitPeriod ? { ...placement, t } : placement;
+    setHeldT(t); s?.holdOrbits(t);
     try {
-      const res = await api<{ result: TraceResult['result']; hitName: string | null; destroyed: number[]; score: number; status: Play['status']; play: Play; streak: Streak }>('/api/shot', { placement });
-      if (s && preview) await s.fire(preview, energized);
+      const res = await api<{ result: TraceResult['result']; hitName: string | null; destroyed: number[]; score: number; status: Play['status']; play: Play; streak: Streak }>('/api/shot', { placement: shot });
+      if (s) await s.fire(trace(withDestroyed(level, destroyed), shot), energized);
       beamFor.current = placement;
       setPlay(res.play);
       setStreak(res.streak);
@@ -215,11 +252,12 @@ export default function Game() {
     } catch (e) {
       const err = e as Error & { status?: number };
       if (err.status === 401) { setName(null); pendingFire.current = true; setNameOpen(true); }
+      setHeldT(null);
       setStatus({ text: err.message, kind: 'bad' });
     } finally {
       setBusy(false);
     }
-  }, [level, placement, busy, finished, name, preview, energized]);
+  }, [level, placement, busy, finished, name, energized, destroyed]);
 
   // practice shots are traced locally with the same physics and never sent to the server
   const practiceFire = async () => {
@@ -228,12 +266,15 @@ export default function Game() {
     setStatus({ text: 'Practice beam away…' });
     const s = sceneRef.current;
     s?.setPreview(null, 0); s?.clearBeam();
-    if (s) await s.fire(preview, energized);
-    if (energized && preview.rocksHit.length) setPracticeDestroyed((d) => [...new Set([...d, ...preview.rocksHit])]);
+    const t = s?.orbitTime() ?? 0;
+    setHeldT(t); s?.holdOrbits(t);
+    const res = trace(withDestroyed(level, destroyed), { ...placement, t });
+    if (s) await s.fire(res, energized);
+    if (energized && res.rocksHit.length) setPracticeDestroyed((d) => [...new Set([...d, ...res.rocksHit])]);
     beamFor.current = placement;
-    if (preview.result === 'hit') setStatus({ text: 'Practice: beacon lit! This one doesn’t count.', kind: 'good' });
-    else if (energized && preview.rocksHit.length) setStatus({ text: 'Practice: asteroid destroyed!', kind: 'bad' });
-    else setStatus({ text: `Practice: ${missText(level, preview.result, preview.hitName)}`, kind: 'bad' });
+    if (res.result === 'hit') setStatus({ text: 'Practice: beacon lit! This one doesn’t count.', kind: 'good' });
+    else if (energized && res.rocksHit.length) setStatus({ text: 'Practice: asteroid destroyed!', kind: 'bad' });
+    else setStatus({ text: `Practice: ${missText(level, res.result, res.hitName)}`, kind: 'bad' });
     setBusy(false);
   };
 
