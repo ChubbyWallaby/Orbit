@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import type { BoardEntry } from '@/server/store';
+import { pidHeaders } from './pid';
 
 type Board = { scope: 'day' | 'all'; top: BoardEntry[]; me: BoardEntry | null; players: number };
 
@@ -11,7 +12,7 @@ export default function Leaderboard({ onClose, puzzleNumber }: { onClose: () => 
 
   useEffect(() => {
     let live = true;
-    fetch(`/api/leaderboard?scope=${scope}`)
+    fetch(`/api/leaderboard?scope=${scope}`, { headers: pidHeaders() })
       .then(async (r) => { const j = await r.json(); if (!r.ok) throw new Error(j.error); return j; })
       .then((j) => live && setBoard(j))
       .catch((e) => live && setError(e.message || 'Could not load the leaderboard.'));
