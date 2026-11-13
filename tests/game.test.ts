@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from 'vitest';
 import { bodiesAt, constrainMoon, orbitClock, previewLimit, trace, withDestroyed, type Level } from '@/game/engine';
 import { generateLevel, featuresFor, FALLBACK_LEVEL, ORBIT_PERIOD } from '@/game/generate';
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
-import { MemoryStore, setStoreForTests, nextStreak, liveStreak, rankEntries } from '@/server/store';
+import { MemoryStore, setStoreForTests, nextStreak, liveStreak, rankEntries, windowStart } from '@/server/store';
 import { isJsonRequest, pickPid, pidCookieOptions } from '@/server/pid';
 import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, GameError } from '@/server/game';
 
@@ -287,6 +287,26 @@ describe('leaderboard ranking', () => {
     const e = (name: string, score: number, games: number) => ({ rank: 0, name, score, games, best: 0, you: false });
     const ranked = rankEntries([e('pikenoDelas', 1000, 2), e('tigas', 1700, 2), e('RidgyTortoise', 1000, 1), e('One plus 5', 1000, 1), e('cenas', 400, 1)]);
     expect(ranked.map((r) => [r.rank, r.name])).toEqual([[1, 'tigas'], [2, 'One plus 5'], [3, 'RidgyTortoise'], [4, 'pikenoDelas'], [5, 'cenas']]);
+  });
+});
+
+describe('leaderboard window', () => {
+  test('the block of 10 under the top 10 holds your rank', () => {
+    expect([1, 10].map(windowStart)).toEqual([null, null]);
+    expect([11, 15, 20, 21, 500, 501, 508, 510].map(windowStart)).toEqual([11, 11, 11, 21, 491, 501, 501, 501]);
+  });
+
+  test('shows the top 10 and the 10 around you, not every pilot', async () => {
+    const s = new MemoryStore();
+    for (let i = 1; i <= 60; i++) { s.names.set(`p${i}`, `Pilot ${i}`); s.allBoard.set(`p${i}`, 10_000 - i); s.games.set(`p${i}`, 1); }
+    const far = await s.board('all', DAY, 'p38');
+    expect(far.top.map((e) => e.rank)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(far.around.map((e) => e.rank)).toEqual([31, 32, 33, 34, 35, 36, 37, 38, 39, 40]);
+    expect(far.me).toMatchObject({ rank: 38, name: 'Pilot 38', you: true });
+    expect(far.players).toBe(60);
+    expect((await s.board('all', DAY, 'p4')).around).toEqual([]);
+    expect((await s.board('all', DAY, null)).around).toEqual([]);
+    expect((await s.board('all', DAY, 'p58')).around.map((e) => e.rank)).toEqual([51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
   });
 });
 

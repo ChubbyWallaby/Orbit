@@ -25,7 +25,8 @@ export interface Store {
   recordShot(day: string, pid: string, shot: number, result: string): Promise<void>;
   /** Finishes the day once. Returns false if it was already finished. */
   finish(day: string, pid: string, status: 'won' | 'lost', score: number): Promise<boolean>;
-  board(scope: 'day' | 'all', day: string, pid: string | null, limit?: number): Promise<{ top: BoardEntry[]; me: BoardEntry | null; players: number }>;
+  /** The top 10, plus the block of 10 around `pid` when they rank lower (see `windowStart`). */
+  board(scope: 'day' | 'all', day: string, pid: string | null): Promise<{ top: BoardEntry[]; around: BoardEntry[]; me: BoardEntry | null; players: number }>;
   getStreak(pid: string, day: string): Promise<Streak>;
   getCached(key: string): Promise<string | null>;
   setCached(key: string, value: string, ttlSeconds: number): Promise<void>;
@@ -150,21 +151,23 @@ class RedisStore implements Store {
   async setCached(key: string, value: string, ttlSeconds: number) {
     await this.r.set(k.cache(key), value, { ex: ttlSeconds });
   }
-  async board(scope: 'day' | 'all', day: string, pid: string | null, limit = 50) {
+  async board(scope: 'day' | 'all', day: string, pid: string | null) {
     const key = scope === 'day' ? k.dayBoard(day) : k.allBoard;
-    const [raw, players] = await Promise.all([
-      this.r.zrange<(string | number)[]>(key, 0, limit - 1, { rev: true, withScores: true }),
+    const [rawTop, players, myIdx] = await Promise.all([
+      this.r.zrange<(string | number)[]>(key, 0, TOP - 1, { rev: true, withScores: true }),
       this.r.zcard(key),
+      pid ? this.r.zrevrank(key, pid) : Promise.resolve(null),
     ]);
-    const rows: { pid: string; score: number }[] = [];
-    for (let i = 0; i < raw.length; i += 2) rows.push({ pid: String(raw[i]), score: Number(raw[i + 1]) });
-    let me: BoardEntry | null = null;
-    let myRow: { pid: string; score: number; rank: number } | null = null;
-    if (pid && !rows.some((r) => r.pid === pid)) {
-      const [rank, score] = await Promise.all([this.r.zrevrank(key, pid), this.r.zscore(key, pid)]);
-      if (rank !== null && score !== null) myRow = { pid, score: Number(score), rank: rank + 1 };
-    }
-    const ids = [...rows.map((r) => r.pid), ...(myRow ? [myRow.pid] : [])];
+    const from = myIdx === null ? null : windowStart(myIdx + 1);
+    const rawAround = from === null ? [] : await this.r.zrange<(string | number)[]>(key, from - 1, from + WINDOW - 2, { rev: true, withScores: true });
+    const pairs = (raw: (string | number)[]) => {
+      const out: { pid: string; score: number }[] = [];
+      for (let i = 0; i < raw.length; i += 2) out.push({ pid: String(raw[i]), score: Number(raw[i + 1]) });
+      return out;
+    };
+    const topRows = pairs(rawTop);
+    const aroundRows = pairs(rawAround);
+    const ids = [...topRows, ...aroundRows].map((r) => r.pid);
     let names: (string | null)[] = [];
     let games: Record<string, unknown> | null = null;
     let bests: Record<string, unknown> | null = null;
@@ -175,14 +178,25 @@ class RedisStore implements Store {
         this.r.hmget<Record<string, unknown>>(k.best, ...ids),
       ]);
     }
-    const entry = (id: string, score: number, rank: number, idx: number): BoardEntry => ({
-      rank, name: names[idx] ?? 'Unknown pilot', score, games: Number(games?.[id] ?? 0), best: Number(bests?.[id] ?? 0), you: id === pid,
+    const entry = (id: string, score: number, idx: number): BoardEntry => ({
+      rank: 0, name: names[idx] ?? 'Unknown pilot', score, games: Number(games?.[id] ?? 0), best: Number(bests?.[id] ?? 0), you: id === pid,
     });
-    const top = rankEntries(rows.map((r, i) => entry(r.pid, r.score, 0, i)));
-    if (myRow) me = entry(myRow.pid, myRow.score, myRow.rank, ids.length - 1);
-    else me = top.find((t) => t.you) ?? null;
-    return { top, me, players };
+    const top = rankEntries(topRows.map((r, i) => entry(r.pid, r.score, i)));
+    // the window is ranked on its own, then shifted to its real place on the board
+    const around = rankEntries(aroundRows.map((r, i) => entry(r.pid, r.score, topRows.length + i)))
+      .map((e) => ({ ...e, rank: e.rank + (from ?? 1) - 1 }));
+    const me = [...top, ...around].find((e) => e.you) ?? null;
+    return { top, around, me, players };
   }
+}
+
+/** The board shows the top 10, then the block of 10 holding your rank (rank 508 shows 501 to 510). */
+export const TOP = 10;
+export const WINDOW = 10;
+/** First rank of the block shown under the top 10 for a pilot at `rank`, or null if they are already in the top 10. */
+export function windowStart(rank: number): number | null {
+  if (rank <= TOP) return null;
+  return Math.floor((rank - 1) / WINDOW) * WINDOW + 1;
 }
 
 /**
@@ -255,12 +269,15 @@ export class MemoryStore implements Store {
     this.streaks.set(pid, nextStreak(this.streaks.get(pid) ?? null, day, status === 'won'));
     return true;
   }
-  async board(scope: 'day' | 'all', day: string, pid: string | null, limit = 50) {
+  async board(scope: 'day' | 'all', day: string, pid: string | null) {
     const m = scope === 'day' ? this.dayBoards.get(day) ?? new Map<string, number>() : this.allBoard;
     const ranked = rankEntries([...m.entries()].map(([id, score]): BoardEntry => ({
       rank: 0, name: this.names.get(id) ?? 'Unknown pilot', score, games: this.games.get(id) ?? 0, best: this.streaks.get(id)?.best ?? 0, you: id === pid,
     })));
-    return { top: ranked.slice(0, limit), me: ranked.find((e) => e.you) ?? null, players: ranked.length };
+    const me = ranked.find((e) => e.you) ?? null;
+    const from = me ? windowStart(me.rank) : null;
+    const around = from === null ? [] : ranked.slice(from - 1, from - 1 + WINDOW);
+    return { top: ranked.slice(0, TOP), around, me, players: ranked.length };
   }
 }
 
