@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { previewLimit, trace, withDestroyed, type Level } from '@/game/engine';
-import { generateLevel, featuresFor, FALLBACK_LEVEL } from '@/game/generate';
+import { bodiesAt, constrainMoon, orbitClock, previewLimit, trace, withDestroyed, type Level } from '@/game/engine';
+import { generateLevel, featuresFor, FALLBACK_LEVEL, ORBIT_PERIOD } from '@/game/generate';
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
 import { MemoryStore, setStoreForTests, nextStreak, liveStreak, rankEntries } from '@/server/store';
 import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, GameError } from '@/server/game';
@@ -88,6 +88,77 @@ describe('star systems', () => {
     }
     expect(suns).toBeGreaterThan(0);
     expect(moons).toBeGreaterThan(0);
+  }, 180000);
+});
+
+describe('orbiting moons', () => {
+  // beam along +x from (-20, 0); a moon orbits (0, 3) at radius 3, starting right on the beam at (0, 0)
+  const moonlet = { x: 0, z: 0, r: 0.6, m: 0.05, name: 'Nim I', kind: 'moonlet' as const, orbit: { x: 0, z: 3, r: 3, laps: 4 } };
+  const level: Level = {
+    ...FALLBACK_LEVEL(DAY), emitter: { x: -20, z: 0, dir: 0 }, target: { x: 20, z: 0, r: 1.5 }, bodies: [moonlet], rocks: [], splitters: [], wormholes: [], orbitPeriod: 240,
+  };
+  const farMoon = { moon: { x: -25, z: 20 }, angle: 0 };
+
+  test('moons go round their planet and are back at the start after a period', () => {
+    expect(bodiesAt(level, 0)).toBe(level.bodies);
+    const half = bodiesAt(level, 240 / 8)[0]; // half a lap
+    expect(half.x).toBeCloseTo(0, 6); expect(half.z).toBeCloseTo(6, 6);
+    const quarter = bodiesAt(level, 240 / 16)[0];
+    expect(Math.hypot(quarter.x, quarter.z - 3)).toBeCloseTo(3, 6);
+    const lap = bodiesAt(level, 240)[0];
+    expect(lap.x).toBeCloseTo(0, 6); expect(lap.z).toBeCloseTo(0, 6);
+    // levels without an orbit period keep their moons still
+    expect(bodiesAt({ ...level, orbitPeriod: undefined }, 30)).toBe(level.bodies);
+  });
+
+  test('the shot depends on where the moon is when you fire', () => {
+    expect(trace(level, { ...farMoon, t: 0 })).toMatchObject({ result: 'absorbed', hitName: 'Nim I' });
+    expect(trace(level, { ...farMoon, t: 30 }).result).toBe('hit');
+  });
+
+  test('the orbit clock wraps every period, in hundredths of a second', () => {
+    expect(orbitClock(level, 0)).toBe(0);
+    expect(orbitClock(level, 1234567)).toBe(34.56);
+    expect(orbitClock(level, 240000)).toBe(0);
+    expect(orbitClock(level, 20000, 0.5)).toBe(10);
+    expect(orbitClock({ ...level, orbitPeriod: undefined }, 1234567)).toBe(0);
+  });
+
+  test('nothing can be placed on an orbiting moon\'s path', () => {
+    const p = constrainMoon(level, { x: 0, z: 6 }, 1);
+    expect(Math.hypot(p.x, p.z - 3)).toBeGreaterThanOrEqual(3 + 0.6 + 1 + 0.4 - 1e-9);
+    // a still moon only blocks the spot it sits on
+    const still = { ...level, bodies: [{ ...moonlet, orbit: { x: 0, z: 3, r: 3 } }] };
+    expect(constrainMoon(still, { x: 0, z: 6 }, 1)).toEqual({ x: 0, z: 6 });
+  });
+
+  test('the server checks the orbit time and traces the shot at it', () => {
+    expect(parsePlacement(level, { ...farMoon, t: 30.004 }, [])).toMatchObject({ t: 30 });
+    expect(parsePlacement(level, farMoon, [])).toMatchObject({ t: 0 });
+    for (const t of [-1, 240, Infinity, '3']) expect(() => parsePlacement(level, { ...farMoon, t }, []), String(t)).toThrow('Invalid shot');
+    // no orbits today: the time is ignored
+    expect(parsePlacement({ ...level, orbitPeriod: undefined }, { ...farMoon, t: 99 }, [])).not.toHaveProperty('t');
+  });
+
+  test('daily moons orbit without changing the puzzle', () => {
+    let orbiting = 0;
+    for (let i = 3; i <= 17; i++) {
+      const day = new Date(Date.UTC(2026, 10, 10 + i)).toISOString().slice(0, 10);
+      const { level: L, solution } = generateLevel(day);
+      const movers = L.bodies.filter((b) => b.orbit?.laps);
+      if (!movers.length) { expect(L.orbitPeriod, day).toBeUndefined(); continue; }
+      orbiting++;
+      expect(L.orbitPeriod).toBe(ORBIT_PERIOD);
+      for (const m of movers) expect(Math.abs(m.orbit!.laps!), day).toBeGreaterThanOrEqual(3);
+      // the solved board is orbit time 0, and the start never wins on its own at any moment
+      expect(trace(L, { ...solution, t: 0 }).result, day).toBe('hit');
+      for (let t = 0; t < ORBIT_PERIOD; t += 7.5) {
+        expect(trace(L, { moon: L.moon.start, angle: L.moon.startAngle, t }).result, `${day} t=${t}`).not.toBe('hit');
+      }
+      expect(() => parsePlacement(L, solution, []), day).not.toThrow();
+      expect(() => parsePlacement(L, { moon: L.moon.start, angle: L.moon.startAngle }, []), day).not.toThrow();
+    }
+    expect(orbiting).toBeGreaterThan(0);
   }, 180000);
 });
 
@@ -303,7 +374,7 @@ describe('server game', () => {
     const day = '2099-01-01';
     const level: Level = { ...FALLBACK_LEVEL(day), emitter: { x: -20, z: 0, dir: 0 }, target: { x: 20, z: 0, r: 1.5 }, bodies: [], splitters: [], wormholes: [], rocks: [{ x: 0, z: 0, r: 1 }] };
     const placement = { moon: { x: -25, z: 20 }, angle: 0 };
-    await store.setCached(`level:v4:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
+    await store.setCached(`level:v5:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
     await setName('e', 'Eve');
     expect((await shoot('e', placement, day)).result).toBe('rock'); // without the helper the rock survives
     expect((await shoot('e', placement, day)).result).toBe('rock');
@@ -317,7 +388,7 @@ describe('server game', () => {
     const day = '2099-01-02';
     const level: Level = { ...FALLBACK_LEVEL(day), emitter: { x: -20, z: 0, dir: 0 }, target: { x: 20, z: 0, r: 1.5 }, bodies: [], splitters: [], wormholes: [], rocks: [{ x: 0, z: 0, r: 1 }] };
     const placement = { moon: { x: -25, z: 20 }, angle: 0 };
-    await store.setCached(`level:v4:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
+    await store.setCached(`level:v5:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
     await setName('f', 'Fox');
     await applyHelper('f', 'energized', day);
     expect((await shoot('f', placement, day)).destroyed).toEqual([0]);

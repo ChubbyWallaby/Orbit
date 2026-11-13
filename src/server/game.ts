@@ -33,7 +33,7 @@ export function levelFor(day: string): Promise<Generated> {
   if (!g) {
     g = (async () => {
       const store = getStore();
-      const key = `level:v4:${day}`;
+      const key = `level:v5:${day}`; // v5: moons orbit
       const hit = await store.getCached(key);
       if (hit) return JSON.parse(hit) as Generated;
       const fresh = generateLevel(day);
@@ -107,7 +107,11 @@ export function parsePlacement(level: Level, raw: unknown, helpers: HelperId[]):
     }
     satellite = { ...pos, angle: ((Math.round(s.angle) % 360) + 360) % 360 };
   }
-  return { moon, angle, satellite };
+  // where the orbiting moons are: any moment is fair, since the player could wait for it
+  if (!level.orbitPeriod) return { moon, angle, satellite };
+  const t = p.t ?? 0;
+  if (!finite(t) || t < 0 || t >= level.orbitPeriod) throw new GameError('Invalid shot.');
+  return { moon, angle, satellite, t: Math.round(t * 100) / 100 };
 }
 
 export async function shoot(pidIn: string | null, raw: unknown, day = currentDay()) {

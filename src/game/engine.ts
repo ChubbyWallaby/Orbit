@@ -4,8 +4,12 @@
 export type Vec = { x: number; z: number };
 /** A `repulsor` has negative mass: it pushes light away instead of pulling it in. */
 export type BodyKind = 'giant' | 'planet' | 'blackhole' | 'sun' | 'moonlet' | 'repulsor';
-/** `orbit` (moonlets only) is the circle the moon sits on around its planet, drawn as a guide. */
-export type Body = Vec & { r: number; m: number; name: string; kind: BodyKind; style?: string; ring?: boolean; orbit?: Vec & { r: number } };
+/**
+ * `orbit` (moonlets only) is the circle the moon sits on around its planet, drawn as a guide.
+ * With `laps`, the moon goes round it: that many full turns every `Level.orbitPeriod` seconds
+ * (negative laps turn the other way). Its x/z is where it is at orbit time 0.
+ */
+export type Body = Vec & { r: number; m: number; name: string; kind: BodyKind; style?: string; ring?: boolean; orbit?: Vec & { r: number; laps?: number } };
 /** `id` is the rock's index in the original level, kept when destroyed rocks are removed. */
 export type Rock = Vec & { r: number; id?: number };
 /** A crystal that lets light through and also reflects a copy. angle = normal direction in degrees. */
@@ -38,6 +42,8 @@ export type Level = {
   moon: { r: number; m: number; name: string; start: Vec; startAngle: number; style?: string };
   mirrorHalf: number;
   bounds: { x: number; z: number };
+  /** Seconds after which every orbiting moon is back where it started. Missing means moons stand still. */
+  orbitPeriod?: number;
 };
 
 /** angle values are in degrees, 0..359 */
@@ -45,6 +51,8 @@ export type Placement = {
   moon: Vec;
   angle: number;
   satellite?: (Vec & { angle: number }) | null;
+  /** Orbit clock in seconds (0 up to the level's orbitPeriod): where the orbiting moons are for this shot. */
+  t?: number;
 };
 
 /** `jump` marks the first point after a wormhole exit (no line is drawn into it). */
@@ -104,11 +112,34 @@ function cross(p: Vec, q: Vec, s: Segment): Vec | null {
   return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? { x: p.x + d1x * t, z: p.z + d1z * t } : null;
 }
 
+/** The level's bodies with every orbiting moon moved to where it is at orbit time `t`. */
+export function bodiesAt(level: Level, t = 0): Body[] {
+  const P = level.orbitPeriod;
+  if (!P || !t) return level.bodies;
+  return level.bodies.map((b) => {
+    const o = b.orbit;
+    if (!o?.laps) return b;
+    const a = (2 * Math.PI * o.laps * t) / P, c = Math.cos(a), s = Math.sin(a);
+    const dx = b.x - o.x, dz = b.z - o.z;
+    return { ...b, x: o.x + dx * c - dz * s, z: o.z + dx * s + dz * c };
+  });
+}
+
+/**
+ * The orbit clock everyone shares: wall-clock seconds, wrapped to the level's period, in hundredths.
+ * `rate` below 1 slows the moons down (for reduced motion); any time is a valid shot.
+ */
+export function orbitClock(level: Level, nowMs: number, rate = 1): number {
+  const P = level.orbitPeriod;
+  if (!P) return 0;
+  return (Math.floor((nowMs * rate) / 10) % (P * 100)) / 100;
+}
+
 type Pending = { p: Vec; v: Vec; start: number; ignore: string | null; fuel: number; source: number };
 
 export function trace(level: Level, placement: Placement, maxSteps = 3600): TraceResult {
   const bodies: Body[] = [
-    ...level.bodies,
+    ...bodiesAt(level, placement.t),
     { x: placement.moon.x, z: placement.moon.z, r: level.moon.r, m: level.moon.m, name: level.moon.name, kind: 'planet' },
   ];
   const mirrors: Segment[] = [mirrorSegment(placement.moon, placement.angle, level.moon.r + MOON_MIRROR_OFFSET, level.mirrorHalf)];
@@ -296,6 +327,8 @@ export function constrainMoon(level: Level, pos: Vec, radius = level.moon.r): Ve
   let z = Math.max(-level.bounds.z + 3, Math.min(level.bounds.z - 3, pos.z));
   const blockers = [
     ...level.bodies.map((B) => ({ x: B.x, z: B.z, r: B.r + radius + (B.kind === 'blackhole' ? 2.2 : 1.2) })),
+    // an orbiting moon sweeps its whole orbit, so nothing may sit anywhere on its path
+    ...level.bodies.flatMap((B) => (B.orbit?.laps && level.orbitPeriod ? [{ x: B.orbit.x, z: B.orbit.z, r: Math.hypot(B.x - B.orbit.x, B.z - B.orbit.z) + B.r + radius + 0.4 }] : [])),
     ...[level.emitter, ...(level.extraEmitters ?? [])].map((E) => ({ x: E.x, z: E.z, r: 4 })),
     { x: level.target.x, z: level.target.z, r: level.target.r + radius + 1.6 },
     ...level.rocks.map((R) => ({ x: R.x, z: R.z, r: R.r + radius + 0.4 })),

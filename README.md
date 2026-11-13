@@ -21,6 +21,8 @@ Most days add a special piece, and some days add two. Each piece is placed so it
 - **Fading light + relay**: the light fades after a set distance. Passing through the gold relay ring gives it its full range back. The solver only accepts solutions that need the relay.
 - **Twin laser stations**: a second station fires at the same moment. Any beam that reaches the beacon wins. Some days both stations can be solved, some days only one.
 
+Small moons go round their planets on the dashed orbit ring, so the board changes while you aim: a moon can drift into the beam and swallow it, or move out of the way. All moons are back where they started every 4 minutes, and everyone sees them in the same place because they follow the clock. When you fire, the moons freeze until you move something, and the server checks the shot with the moons where they were at that moment. Nothing can be placed on a moon's orbit.
+
 The all-time leaderboard adds up every day's points. There is also a board for today.
 
 Every shot is checked on the server: it re-runs the physics, counts the shot, and computes the score, so the browser cannot claim a result.

@@ -5,7 +5,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { constrainMoon, indexAt, MOON_MIRROR_OFFSET, SATELLITE_RADIUS, type Emitter, type Level, type Placement, type Ray, type TraceResult, type Vec } from './engine';
+import { bodiesAt, constrainMoon, indexAt, orbitClock, MOON_MIRROR_OFFSET, SATELLITE_RADIUS, type Emitter, type Level, type Placement, type Ray, type TraceResult, type Vec } from './engine';
 
 const NOISE = `
 float h3(vec3 p){ p = fract(p*0.3183099+.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
@@ -138,6 +138,11 @@ export class OrbitScene {
   private level: Level | null = null;
   private levelGroup = new THREE.Group();
   private animated: { tick: (t: number, dt: number) => void }[] = [];
+  /** moonlet groups that go round their planet, by index into level.bodies */
+  private orbiters: { grp: THREE.Group; i: number }[] = [];
+  /** orbit time the moons are frozen at (while a shot's beam is on screen), or null to follow the clock */
+  private orbitHold: number | null = null;
+  private gridAt = 0;
   private moon = new THREE.Group();
   private moonMirror = new THREE.Group();
   private moonPick = new THREE.Mesh();
@@ -350,7 +355,8 @@ export class OrbitScene {
   }
 
   /** A small moon sitting on a faint orbit ring around its planet. */
-  private buildMoonlet(g: THREE.Group, grp: THREE.Group, b: { r: number; orbit?: Vec & { r: number } }) {
+  private buildMoonlet(g: THREE.Group, grp: THREE.Group, b: { r: number; orbit?: Vec & { r: number; laps?: number } }, i: number) {
+    if (b.orbit?.laps) this.orbiters.push({ grp, i });
     const tex = craterTexture();
     const ball = new THREE.Mesh(new THREE.SphereGeometry(b.r, 32, 24), new THREE.MeshStandardMaterial({ map: tex, bumpMap: tex, bumpScale: 0.03, roughness: 0.95, color: 0xd8d2c8 }));
     grp.add(ball);
@@ -413,6 +419,7 @@ export class OrbitScene {
     this.level = level;
     this.levelGroup.clear();
     this.animated = [];
+    this.orbiters = [];
     this.buildMoon(level);
     this.buildSatellite(level);
     this.moon.visible = true;
@@ -423,7 +430,7 @@ export class OrbitScene {
       const grp = new THREE.Group(); grp.position.set(b.x, 0, b.z);
       if (b.kind === 'blackhole') { this.buildBlackHole(grp, b.r); g.add(grp); return; }
       if (b.kind === 'sun') { this.buildSun(grp, b.r); g.add(grp); return; }
-      if (b.kind === 'moonlet') { this.buildMoonlet(g, grp, b); g.add(grp); return; }
+      if (b.kind === 'moonlet') { this.buildMoonlet(g, grp, b, i); g.add(grp); return; }
       if (b.kind === 'repulsor') { this.buildRepulsor(grp, b.r); g.add(grp); return; }
       const style = b.style ?? (b.kind === 'giant' ? 'amber' : 'blue');
       const mat = planetMaterial(style, i * 3.7 + b.r);
@@ -574,7 +581,7 @@ export class OrbitScene {
 
   private updateGrid(moon: Vec) {
     const level = this.level!; const { LINES, SEG } = this.grid.userData; const GX = level.bounds.x, GZ = level.bounds.z;
-    const masses = [...level.bodies.map((b) => ({ x: b.x, z: b.z, m: b.m })), { x: moon.x, z: moon.z, m: level.moon.m }];
+    const masses = [...bodiesAt(level, this.orbitTime()).map((b) => ({ x: b.x, z: b.z, m: b.m })), { x: moon.x, z: moon.z, m: level.moon.m }];
     let i = 0;
     const put = (x: number, z: number) => {
       let d = 0; for (const B of masses) { const dx = x - B.x, dz = z - B.z; d += 15 * B.m / Math.sqrt(dx * dx + dz * dz + 5); }
@@ -594,6 +601,15 @@ export class OrbitScene {
     const geo = this.grid.geometry;
     geo.attributes.position.needsUpdate = true; geo.attributes.color.needsUpdate = true; geo.computeBoundingSphere();
   }
+
+  /** The orbit time on screen: the shared clock, or the moment a shot was fired while its beam shows. */
+  orbitTime(): number {
+    if (!this.level) return 0;
+    return this.orbitHold ?? orbitClock(this.level, Date.now(), this.reduceMotion ? 0.5 : 1);
+  }
+
+  /** Freezes the orbiting moons at orbit time `t` (null lets them move again). */
+  holdOrbits(t: number | null) { this.orbitHold = t; }
 
   setPlacement(p: Placement) {
     const movedMoon = p.moon.x !== this.moonPos.x || p.moon.z !== this.moonPos.z;
@@ -755,6 +771,12 @@ export class OrbitScene {
   private tick = (now: number) => {
     const dt = Math.min(this.clock.getDelta(), 0.05), t = this.clock.elapsedTime * (this.reduceMotion ? 0.15 : 1);
     for (const a of this.animated) a.tick(t, this.reduceMotion ? dt * 0.15 : dt);
+    if (this.level && this.orbiters.length) {
+      const bodies = bodiesAt(this.level, this.orbitTime());
+      for (const o of this.orbiters) o.grp.position.set(bodies[o.i].x, 0, bodies[o.i].z);
+      // the gravity grid follows the moons a few times a second (they are light, so it barely moves)
+      if (now - this.gridAt > 250 && Number.isFinite(this.moonPos.x)) { this.gridAt = now; this.updateGrid(this.moonPos); }
+    }
     if (this.firing) {
       const F = this.firing, k = Math.max(0, Math.min(1, (now - F.t0) / F.dur)), d = k * F.length;
       F.relayHits = F.relayHits.filter((h) => { if (h.d > d) return true; this.flashAt(h.p, RELAY); return false; });
