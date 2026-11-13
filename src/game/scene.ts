@@ -52,6 +52,12 @@ function planetMaterial(style: string, seed: number) {
         float b = sin(lat*(18.0+uSeed*0.4) + warp*4.0) * 0.5 + 0.5;
         float b2 = sin(lat*57.0 + warp*7.0) * 0.5 + 0.5;
         vec3 c = mix(${dark}, ${light}, b); c = mix(c, ${accent}, b2*0.45);
+        // a swirling storm fixed to the surface, so the planet's spin is easy to see
+        float sa = uSeed * 2.3; vec3 sc = normalize(vec3(cos(sa), sin(uSeed) * 0.45, sin(sa)));
+        vec3 sd = p - sc; float storm = exp(-(sd.x*sd.x + sd.z*sd.z) * 9.0 - sd.y*sd.y * 30.0);
+        float swirl = fbm(sd * 9.0 + vec3(uSeed));
+        c = mix(c, mix(${accent}, ${light}, swirl), smoothstep(0.25, 0.75, storm) * 0.85);
+        c = mix(c, ${dark}, smoothstep(0.05, 0.25, storm) * (1.0 - smoothstep(0.25, 0.5, storm)) * 0.5);
         c = mix(c, ${poles}, smoothstep(0.75,1.0,abs(lat))*0.6);
         float diff = clamp(dot(vN, uSun), 0.0, 1.0);
         vec3 V = normalize(cameraPosition - vW);
@@ -268,7 +274,7 @@ export class OrbitScene {
     const panel = mirrorPanel(level.mirrorHalf * 2); panel.position.x = r + MOON_MIRROR_OFFSET;
     this.moonMirror.add(panel);
     this.moon.add(ball, grab, this.moonPick, this.moonMirror);
-    this.animated.push({ tick: (t, dt) => { ball.rotation.y += dt * 0.12; (grab.material as THREE.MeshBasicMaterial).opacity = this.locked ? 0.12 : 0.35 + Math.sin(t * 2.4) * 0.2; } });
+    this.animated.push({ tick: (t, dt) => { ball.rotation.y += dt * 0.35; (grab.material as THREE.MeshBasicMaterial).opacity = this.locked ? 0.12 : 0.35 + Math.sin(t * 2.4) * 0.2; } });
   }
 
   private buildSatellite(level: Level) {
@@ -340,7 +346,7 @@ export class OrbitScene {
     }));
     const light = new THREE.PointLight(0xffc27a, 60, 45, 1.6);
     grp.add(ball, corona, light);
-    this.animated.push({ tick: (t, dt) => { surface.uniforms.uT.value = t; ball.rotation.y += dt * 0.03; light.intensity = 55 + Math.sin(t * 1.3) * 6; } });
+    this.animated.push({ tick: (t, dt) => { surface.uniforms.uT.value = t; ball.rotation.y += dt * 0.08; light.intensity = 55 + Math.sin(t * 1.3) * 6; } });
   }
 
   /** A small moon sitting on a faint orbit ring around its planet. */
@@ -354,7 +360,7 @@ export class OrbitScene {
       const ring = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineDashedMaterial({ color: 0x9fb0d8, dashSize: 0.35, gapSize: 0.45, transparent: true, opacity: 0.4, depthWrite: false }));
       ring.computeLineDistances(); g.add(ring);
     }
-    this.animated.push({ tick: (_t, dt) => { ball.rotation.y += dt * 0.25; } });
+    this.animated.push({ tick: (_t, dt) => { ball.rotation.y += dt * 0.5; } });
   }
 
   /** A repulsor: a hot white-blue core that sends pressure waves outward. */
@@ -421,9 +427,13 @@ export class OrbitScene {
       if (b.kind === 'repulsor') { this.buildRepulsor(grp, b.r); g.add(grp); return; }
       const style = b.style ?? (b.kind === 'giant' ? 'amber' : 'blue');
       const mat = planetMaterial(style, i * 3.7 + b.r);
-      const ball = new THREE.Mesh(new THREE.SphereGeometry(b.r, 96, 64), mat); ball.rotation.z = 0.12;
+      const ball = new THREE.Mesh(new THREE.SphereGeometry(b.r, 96, 64), mat);
+      // spin about a tilted axis: the tilt lives on a parent so the spin stays about the planet's own pole
+      const axis = new THREE.Group(); axis.rotation.z = 0.1 + ((i * 0.37) % 0.25); axis.add(ball);
+      ball.rotation.y = i * 1.9;
+      const spin = (0.22 + ((i * 0.61) % 0.2)) * (b.kind === 'giant' ? 1.3 : 1) * (i % 3 === 2 ? -1 : 1);
       const halo = (PALETTES[style] ?? PALETTES.amber).halo;
-      grp.add(ball, new THREE.Mesh(new THREE.SphereGeometry(b.r * 1.12, 64, 48), haloMaterial(new THREE.Color(...halo))));
+      grp.add(axis, new THREE.Mesh(new THREE.SphereGeometry(b.r * 1.12, 64, 48), haloMaterial(new THREE.Color(...halo))));
       if (b.kind === 'giant' && b.ring !== false) {
         const ring = new THREE.Mesh(new THREE.RingGeometry(b.r * 1.3, b.r * 2.15, 160, 1), new THREE.ShaderMaterial({
           transparent: true, side: THREE.DoubleSide, depthWrite: false,
@@ -439,7 +449,7 @@ export class OrbitScene {
         ring.rotation.x = -Math.PI / 2 + 0.42; ring.rotation.y = 0.25; grp.add(ring);
       }
       g.add(grp);
-      this.animated.push({ tick: (t, dt) => { ball.rotation.y += dt * 0.05; mat.uniforms.uT.value = t; } });
+      this.animated.push({ tick: (t, dt) => { ball.rotation.y += dt * spin; mat.uniforms.uT.value = t; } });
     });
 
     // laser stations
