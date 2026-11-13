@@ -178,20 +178,21 @@ class RedisStore implements Store {
     const entry = (id: string, score: number, rank: number, idx: number): BoardEntry => ({
       rank, name: names[idx] ?? 'Unknown pilot', score, games: Number(games?.[id] ?? 0), best: Number(bests?.[id] ?? 0), you: id === pid,
     });
-    const top = rankRows(rows).map((r, i) => entry(r.pid, r.score, r.rank, i));
+    const top = rankEntries(rows.map((r, i) => entry(r.pid, r.score, 0, i)));
     if (myRow) me = entry(myRow.pid, myRow.score, myRow.rank, ids.length - 1);
     else me = top.find((t) => t.you) ?? null;
     return { top, me, players };
   }
 }
 
-/** Standard competition ranking: equal scores share a rank (1, 2, 2, 4). */
-function rankRows<T extends { score: number }>(rows: T[]): (T & { rank: number })[] {
-  return rows.map((r, i) => {
-    let rank = i + 1;
-    while (rank > 1 && rows[rank - 2].score === r.score) rank--;
-    return { ...r, rank };
-  });
+/**
+ * Every pilot gets their own place (1, 2, 3, 4), never a shared one.
+ * Ties on points go to the pilot with fewer games played (same points in fewer games), then by name.
+ */
+export function rankEntries(entries: BoardEntry[]): BoardEntry[] {
+  return [...entries]
+    .sort((a, b) => b.score - a.score || a.games - b.games || a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    .map((e, i) => ({ ...e, rank: i + 1 }));
 }
 
 export class MemoryStore implements Store {
@@ -256,12 +257,10 @@ export class MemoryStore implements Store {
   }
   async board(scope: 'day' | 'all', day: string, pid: string | null, limit = 50) {
     const m = scope === 'day' ? this.dayBoards.get(day) ?? new Map<string, number>() : this.allBoard;
-    const sorted = rankRows([...m.entries()].map(([id, score]) => ({ pid: id, score })).sort((a, b) => b.score - a.score || (a.pid < b.pid ? 1 : -1)));
-    const toEntry = (r: { pid: string; score: number; rank: number }): BoardEntry => ({
-      rank: r.rank, name: this.names.get(r.pid) ?? 'Unknown pilot', score: r.score, games: this.games.get(r.pid) ?? 0, best: this.streaks.get(r.pid)?.best ?? 0, you: r.pid === pid,
-    });
-    const mine = sorted.find((r) => r.pid === pid);
-    return { top: sorted.slice(0, limit).map(toEntry), me: mine ? toEntry(mine) : null, players: sorted.length };
+    const ranked = rankEntries([...m.entries()].map(([id, score]): BoardEntry => ({
+      rank: 0, name: this.names.get(id) ?? 'Unknown pilot', score, games: this.games.get(id) ?? 0, best: this.streaks.get(id)?.best ?? 0, you: id === pid,
+    })));
+    return { top: ranked.slice(0, limit), me: ranked.find((e) => e.you) ?? null, players: ranked.length };
   }
 }
 
