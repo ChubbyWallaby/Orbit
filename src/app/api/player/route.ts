@@ -5,6 +5,7 @@ export async function POST(req: Request) {
   return handle(async () => {
     const { name } = await body(req);
     const pid = await ensurePid();
-    return { name: await setName(pid, name) };
+    // the page keeps the id too, for browsers that block cookies inside an iframe
+    return { name: await setName(pid, name), pid };
   });
 }

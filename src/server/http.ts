@@ -1,22 +1,19 @@
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import type { NextRequest } from 'next/server';
 import { GameError } from './game';
+import { PID_COOKIE, PID_HEADER, isJsonRequest, pickPid, pidCookieOptions } from './pid';
 
-export const PID_COOKIE = 'orbit_pid';
-
-/** Reads the player id from the request's cookie (using the request keeps GET handlers out of prerendering). */
+/** Reads the player id from the cookie, or the header when cookies are blocked (using the request keeps GET handlers out of prerendering). */
 export async function readPid(req?: NextRequest): Promise<string | null> {
-  const v = req ? req.cookies.get(PID_COOKIE)?.value : (await cookies()).get(PID_COOKIE)?.value;
-  return v && /^[0-9a-f-]{36}$/.test(v) ? v : null;
+  if (req) return pickPid(req.cookies.get(PID_COOKIE)?.value, req.headers.get(PID_HEADER));
+  return pickPid((await cookies()).get(PID_COOKIE)?.value, (await headers()).get(PID_HEADER));
 }
 
 export async function ensurePid(): Promise<string> {
-  const existing = await readPid();
-  if (existing) return existing;
-  const pid = crypto.randomUUID();
-  (await cookies()).set(PID_COOKIE, pid, {
-    httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', path: '/', maxAge: 60 * 60 * 24 * 400,
-  });
+  const jar = await cookies();
+  const pid = (await readPid()) ?? crypto.randomUUID();
+  // (re)set the cookie when it is missing, e.g. for a player who only had the header
+  if (jar.get(PID_COOKIE)?.value !== pid) jar.set(PID_COOKIE, pid, pidCookieOptions(process.env.NODE_ENV === 'production'));
   return pid;
 }
 
@@ -31,6 +28,7 @@ export async function handle(fn: () => Promise<unknown>) {
 }
 
 export async function body(req: Request): Promise<Record<string, unknown>> {
+  if (!isJsonRequest(req.headers.get('content-type'))) throw new GameError('Invalid request.', 415);
   try {
     const b = await req.json();
     return b && typeof b === 'object' ? b : {};

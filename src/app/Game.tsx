@@ -7,11 +7,14 @@ import type { TodayPayload } from '@/server/game';
 import type { Play, Streak } from '@/server/store';
 import { track } from '@vercel/analytics';
 import Leaderboard from './Leaderboard';
+import { pidHeaders, savePid } from './pid';
 
 type Status = { text: string; kind?: 'good' | 'bad' };
 
 async function api<T>(url: string, body?: unknown): Promise<T> {
-  const r = await fetch(url, body === undefined ? undefined : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await fetch(url, body === undefined
+    ? { headers: pidHeaders() }
+    : { method: 'POST', headers: { ...pidHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(j.error || 'Could not reach the server. Check your connection and try again.'), { status: r.status });
   return j as T;
@@ -376,7 +379,7 @@ function NameDialog({ initial, onDone, onSkip }: { initial: string; onDone: (nam
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true); setError(null);
-    try { const r = await api<{ name: string }>('/api/player', { name: value }); onDone(r.name); }
+    try { const r = await api<{ name: string; pid: string }>('/api/player', { name: value }); savePid(r.pid); onDone(r.name); }
     catch (err) { setError((err as Error).message); }
     finally { setSaving(false); }
   };

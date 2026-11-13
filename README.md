@@ -49,6 +49,12 @@ To play a different day's puzzle while testing, set `ORBIT_DAY`, for example `OR
 npm test
 ```
 
+## Embedding on game portals
+
+`embed/index.html` is a one-page wrapper that loads orbitpuzzle.com in a full-size iframe. Zip it and upload it as an HTML5 game (itch.io: "This file will be played in the browser"). Change `ref=` in it for each portal.
+
+Inside another site's iframe the player cookie is third-party, so in production it is set `SameSite=None; Secure; Partitioned`. Browsers that block it anyway (Safari) still work: the page keeps the player id in its storage and sends it as an `x-orbit-pid` header. Because cookies now travel with cross-site requests, the API only accepts POSTs sent as `application/json`, which another site cannot forge.
+
 ## Deploying
 
 Deploy to Vercel and add the **Upstash Redis** integration from the Vercel Marketplace. It sets `KV_REST_API_URL` and `KV_REST_API_TOKEN`, which the app picks up automatically. In production the app refuses to start the leaderboard without them, rather than silently losing scores.

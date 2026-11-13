@@ -3,6 +3,7 @@ import { previewLimit, trace, withDestroyed, type Level } from '@/game/engine';
 import { generateLevel, featuresFor, FALLBACK_LEVEL } from '@/game/generate';
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
 import { MemoryStore, setStoreForTests, nextStreak, liveStreak, rankEntries } from '@/server/store';
+import { isJsonRequest, pickPid, pidCookieOptions } from '@/server/pid';
 import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, GameError } from '@/server/game';
 
 const DAY = '2026-11-10';
@@ -342,5 +343,28 @@ describe('server game', () => {
     const d1 = await leaderboard(null, 'day', DAY);
     expect(d1.top.map((e) => e.name)).toEqual(['Ana', 'Bo']);
     expect(d1.me).toBeNull();
+  });
+});
+
+describe('player id in iframes', () => {
+  const A = '11111111-1111-4111-8111-111111111111';
+  const B = '22222222-2222-4222-8222-222222222222';
+  test('cookie wins, header is the fallback, junk is ignored', () => {
+    expect(pickPid(A, B)).toBe(A);
+    expect(pickPid(undefined, B)).toBe(B);
+    expect(pickPid('nope', B)).toBe(B);
+    expect(pickPid(null, 'x'.repeat(36))).toBeNull();
+    expect(pickPid(null, null)).toBeNull();
+  });
+  test('production cookie works as a third-party cookie', () => {
+    expect(pidCookieOptions(true)).toMatchObject({ sameSite: 'none', secure: true, partitioned: true, httpOnly: true });
+    expect(pidCookieOptions(false)).toMatchObject({ sameSite: 'lax', secure: false });
+  });
+  test('only JSON posts are accepted', () => {
+    expect(isJsonRequest('application/json')).toBe(true);
+    expect(isJsonRequest('application/json; charset=utf-8')).toBe(true);
+    expect(isJsonRequest('text/plain')).toBe(false);
+    expect(isJsonRequest('application/x-www-form-urlencoded')).toBe(false);
+    expect(isJsonRequest(null)).toBe(false);
   });
 });
