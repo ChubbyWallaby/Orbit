@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from 'vitest';
 import { previewLimit, trace, withDestroyed, type Level } from '@/game/engine';
 import { generateLevel, featuresFor, FALLBACK_LEVEL } from '@/game/generate';
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
-import { MemoryStore, setStoreForTests, nextStreak, liveStreak } from '@/server/store';
+import { MemoryStore, setStoreForTests, nextStreak, liveStreak, rankEntries } from '@/server/store';
 import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, GameError } from '@/server/game';
 
 const DAY = '2026-11-10';
@@ -210,6 +210,14 @@ describe('aiming line', () => {
   });
 });
 
+describe('leaderboard ranking', () => {
+  test('no shared places: ties go to fewer games, then name', () => {
+    const e = (name: string, score: number, games: number) => ({ rank: 0, name, score, games, best: 0, you: false });
+    const ranked = rankEntries([e('pikenoDelas', 1000, 2), e('tigas', 1700, 2), e('RidgyTortoise', 1000, 1), e('One plus 5', 1000, 1), e('cenas', 400, 1)]);
+    expect(ranked.map((r) => [r.rank, r.name])).toEqual([[1, 'tigas'], [2, 'One plus 5'], [3, 'RidgyTortoise'], [4, 'pikenoDelas'], [5, 'cenas']]);
+  });
+});
+
 describe('streaks', () => {
   test('consecutive wins build a streak, a loss or a skipped day resets it', () => {
     let row = nextStreak(null, '2026-11-10', true);
@@ -324,11 +332,11 @@ describe('server game', () => {
     await shoot('c', sol2, day2); // 1000 on day 2
     await shoot('b', sol2, day2); // b total 1700
     const all = await leaderboard('c', 'all', day2);
-    // equal scores share a rank; order within a tie follows Redis (reverse member order)
-    expect(all.top.map((e) => [e.rank, e.name, e.score, e.games]).sort()).toEqual([
-      [1, 'Bo', 1700, 2], [2, 'Ana', 1000, 1], [2, 'Cy', 1000, 1],
+    // every pilot gets their own place; a tie on points and games goes by name
+    expect(all.top.map((e) => [e.rank, e.name, e.score, e.games])).toEqual([
+      [1, 'Bo', 1700, 2], [2, 'Ana', 1000, 1], [3, 'Cy', 1000, 1],
     ]);
-    expect(all.me).toMatchObject({ name: 'Cy', rank: 2, you: true });
+    expect(all.me).toMatchObject({ name: 'Cy', rank: 3, you: true });
     expect(all.top.find((e) => e.name === 'Bo')).toMatchObject({ best: 2 });
     expect((await today('b', day2)).me.streak).toEqual({ current: 2, best: 2 });
     const d1 = await leaderboard(null, 'day', DAY);
