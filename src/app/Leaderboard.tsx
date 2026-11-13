@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import type { BoardEntry } from '@/server/store';
 import { pidHeaders } from './pid';
 
-type Board = { scope: 'day' | 'all'; top: BoardEntry[]; me: BoardEntry | null; players: number };
+type Board = { scope: 'day' | 'all'; top: BoardEntry[]; around: BoardEntry[]; me: BoardEntry | null; players: number };
 
 export default function Leaderboard({ onClose, puzzleNumber }: { onClose: () => void; puzzleNumber: number }) {
   const [scope, setScope] = useState<'all' | 'day'>('all');
@@ -26,7 +26,9 @@ export default function Leaderboard({ onClose, puzzleNumber }: { onClose: () => 
   }, [onClose]);
 
   const pick = (s: 'all' | 'day') => { if (s !== scope) { setBoard(null); setError(null); setScope(s); } };
-  const meOutside = board?.me && !board.top.some((e) => e.you);
+  // a divider only when the block around you doesn't follow straight on from the top 10
+  const around = board?.around ?? [];
+  const gap = around.length > 0 && around[0].rank > (board?.top.at(-1)?.rank ?? 0) + 1;
   return (
     <div className="overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="card board" role="dialog" aria-labelledby="lbTitle">
@@ -50,8 +52,8 @@ export default function Leaderboard({ onClose, puzzleNumber }: { onClose: () => 
               <thead><tr><th>#</th><th>Pilot</th><th className="num">Games</th><th className="num" title="Longest run of days with the beacon lit">Best streak</th><th className="num">Points</th></tr></thead>
               <tbody>
                 {board.top.map((e, i) => <Row key={i} e={e} />)}
-                {meOutside && <tr className="gap"><td colSpan={5}>⋯</td></tr>}
-                {meOutside && board.me && <Row e={board.me} />}
+                {gap && <tr className="gap"><td colSpan={5}>⋯</td></tr>}
+                {around.map((e) => <Row key={`a${e.rank}`} e={e} />)}
               </tbody>
             </table>
           )}
