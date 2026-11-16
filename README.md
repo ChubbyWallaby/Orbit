@@ -27,6 +27,8 @@ The all-time leaderboard adds up every day's points. There is also a board for t
 
 Every shot is checked on the server: it re-runs the physics, counts the shot, and computes the score, so the browser cannot claim a result.
 
+Shots from scripts are turned away. The page runs the moons on the server's clock, and a shot whose moons are more than 10 seconds away from where they really are is rejected; firing again at the moment the last shot froze is still fine. A winning shot is also rejected, with a message and without using up a shot, if the page reports no drag or turn of the moon, mirror or satellite, or if it comes less than 20 seconds after the pilot first opened the day's board. Misses are never checked. This stops copy-paste solvers, not a determined cheat: the board and the physics have to reach the browser for the aiming line to work.
+
 ## Project layout
 
 - `src/game/engine.ts`: light-bending physics and mirror reflections, shared by browser and server
@@ -58,5 +60,7 @@ npm test
 Inside another site's iframe the player cookie is third-party, so in production it is set `SameSite=None; Secure; Partitioned`. Browsers that block it anyway (Safari) still work: the page keeps the player id in its storage and sends it as an `x-orbit-pid` header. Because cookies now travel with cross-site requests, the API only accepts POSTs sent as `application/json`, which another site cannot forge.
 
 ## Deploying
+
+Set `ORBIT_SEED_SECRET` to a long random string (for example `openssl rand -hex 32`) in the Vercel project's environment variables, and keep it private. The level generator is in this public repository, so without the secret anyone could run it for any day and read the solution. Changing or removing the secret changes every board that is not already cached, so set it once and leave it.
 
 Deploy to Vercel and add the **Upstash Redis** integration from the Vercel Marketplace. It sets `KV_REST_API_URL` and `KV_REST_API_TOKEN`, which the app picks up automatically. In production the app refuses to start the leaderboard without them, rather than silently losing scores.

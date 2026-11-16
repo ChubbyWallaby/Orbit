@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, test } from 'vitest';
 import { bodiesAt, constrainMoon, orbitClock, previewLimit, trace, withDestroyed, type Level } from '@/game/engine';
 import { generateLevel, featuresFor, FALLBACK_LEVEL, ORBIT_PERIOD } from '@/game/generate';
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
-import { MemoryStore, setStoreForTests, nextStreak, liveStreak, rankEntries, windowStart } from '@/server/store';
+import { MemoryStore, getStore as getStoreForTest, setStoreForTests, nextStreak, liveStreak, rankEntries, windowStart } from '@/server/store';
 import { isJsonRequest, pickPid, pidCookieOptions } from '@/server/pid';
-import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, GameError } from '@/server/game';
+import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, checkClock, GameError, CLOCK_SLACK, MIN_SOLVE_MS } from '@/server/game';
 
 const DAY = '2026-11-10';
+// a fixed moment, long after any test's real clock, when the shared orbit clock reads 0
+const NOW = ORBIT_PERIOD * 1000 * 10_000_000;
 
 describe('rules', () => {
   test('score depends on shot and helpers', () => {
@@ -49,6 +51,19 @@ describe('generator', () => {
     }
     expect([...kinds].sort()).toEqual(['blackhole', 'mirrors', 'plain', 'relay', 'repulsor', 'splitter', 'twin', 'wormhole']);
   }, 240000);
+});
+
+describe('seed secret', () => {
+  test('a secret gives a different, still solvable board that the public generator cannot reproduce', () => {
+    const open = generateLevel(DAY);
+    const secret = generateLevel(DAY, 'test-secret');
+    expect(JSON.stringify(secret.level)).not.toBe(JSON.stringify(open.level));
+    expect(JSON.stringify(generateLevel(DAY, 'test-secret'))).toBe(JSON.stringify(secret));
+    expect(secret.level.day).toBe(DAY);
+    expect(trace(secret.level, secret.solution).result).toBe('hit');
+    // the solution read from the public generator does not solve the real board
+    expect(trace(secret.level, open.solution).result).not.toBe('hit');
+  }, 60000);
 });
 
 describe('board variety', () => {
@@ -338,6 +353,8 @@ describe('server game', () => {
   let miss: () => import('@/game/engine').Placement;
   let sol2: import('@/game/engine').Placement;
   let giant: { x: number; z: number };
+  // shots as the page sends them: aimed by hand, at a moment when the shared orbit clock reads 0
+  const fire = (pid: string, p: unknown, day: string) => shoot(pid, p, day, { moves: 3 }, NOW);
 
   test('names are validated', () => {
     expect(cleanName('  Nova   Pilot ')).toBe('Nova Pilot');
@@ -354,22 +371,22 @@ describe('server game', () => {
   });
 
   test('requires a name before shooting', async () => {
-    await expect(shoot('a', sol(), DAY)).rejects.toThrow('Pick a pilot name');
+    await expect(fire('a', sol(), DAY)).rejects.toThrow('Pick a pilot name');
   });
 
   test('win on second shot with a helper scores 700 - 150', async () => {
     await setName('a', 'Ana');
-    expect((await shoot('a', miss(), DAY)).status).toBe('playing');
+    expect((await fire('a', miss(), DAY)).status).toBe('playing');
     await applyHelper('a', 'scanner', DAY);
-    const r = await shoot('a', sol(), DAY);
+    const r = await fire('a', sol(), DAY);
     expect(r).toMatchObject({ result: 'hit', status: 'won', score: 550, shot: 2 });
-    await expect(shoot('a', sol(), DAY)).rejects.toThrow('already finished');
+    await expect(fire('a', sol(), DAY)).rejects.toThrow('already finished');
     await expect(applyHelper('a', 'energized', DAY)).rejects.toThrow('already finished');
   });
 
   test('three misses lose with zero points and count as a game', async () => {
     await setName('b', 'Bo');
-    for (let i = 0; i < 3; i++) await shoot('b', miss(), DAY);
+    for (let i = 0; i < 3; i++) await fire('b', miss(), DAY);
     expect((await today('b', DAY)).me.play.status).toBe('lost');
     const lb = await leaderboard('b', 'all', DAY);
     expect(lb.me).toMatchObject({ score: 0, games: 1 });
@@ -378,7 +395,7 @@ describe('server game', () => {
   test('satellite needs the helper, and the retired ghost moon is refused', async () => {
     await setName('c', 'Cy');
     const withSat = { ...miss(), satellite: { x: -20, z: -18, angle: 0 } };
-    await expect(shoot('c', withSat, DAY)).rejects.toThrow('Unlock the mirror satellite');
+    await expect(fire('c', withSat, DAY)).rejects.toThrow('Unlock the mirror satellite');
     await expect(applyHelper('c', 'ghost', DAY)).rejects.toThrow('Unknown helper');
     expect((await applyHelper('c', 'energized', DAY)).helpers).toEqual(['energized']);
   });
@@ -386,8 +403,8 @@ describe('server game', () => {
 
   test('rejects impossible placements', async () => {
     await setName('d', 'Di');
-    await expect(shoot('d', { moon: { x: giant.x, z: giant.z }, angle: 0 }, DAY)).rejects.toThrow('cannot sit');
-    await expect(shoot('d', { moon: { x: 'a' }, angle: 0 }, DAY)).rejects.toThrow('Invalid shot');
+    await expect(fire('d', { moon: { x: giant.x, z: giant.z }, angle: 0 }, DAY)).rejects.toThrow('cannot sit');
+    await expect(fire('d', { moon: { x: 'a' }, angle: 0 }, DAY)).rejects.toThrow('Invalid shot');
   });
 
   test('the energized laser destroys an asteroid so the next shot gets through', async () => {
@@ -397,10 +414,10 @@ describe('server game', () => {
     const placement = { moon: { x: -25, z: 20 }, angle: 0 };
     await store.setCached(`level:v5:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
     await setName('e', 'Eve');
-    expect((await shoot('e', placement, day)).result).toBe('rock'); // without the helper the rock survives
-    expect((await shoot('e', placement, day)).result).toBe('rock');
+    expect((await fire('e', placement, day)).result).toBe('rock'); // without the helper the rock survives
+    expect((await fire('e', placement, day)).result).toBe('rock');
     await applyHelper('e', 'energized', day);
-    const third = await shoot('e', placement, day);
+    const third = await fire('e', placement, day);
     expect(third).toMatchObject({ result: 'rock', destroyed: [0], status: 'lost' });
     expect(third.play.destroyed).toEqual([0]);
   });
@@ -412,17 +429,17 @@ describe('server game', () => {
     await store.setCached(`level:v5:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
     await setName('f', 'Fox');
     await applyHelper('f', 'energized', day);
-    expect((await shoot('f', placement, day)).destroyed).toEqual([0]);
-    expect(await shoot('f', placement, day)).toMatchObject({ result: 'hit', status: 'won', score: 700 - 200 });
+    expect((await fire('f', placement, day)).destroyed).toEqual([0]);
+    expect(await fire('f', placement, day)).toMatchObject({ result: 'hit', status: 'won', score: 700 - 200 });
   });
 
   test('cumulative leaderboard ranks across days and marks you', async () => {
     const day2 = '2026-11-11';
     await setName('a', 'Ana'); await setName('b', 'Bo'); await setName('c', 'Cy');
-    await shoot('a', sol(), DAY); // 1000
-    await shoot('b', miss(), DAY); await shoot('b', sol(), DAY); // 700
-    await shoot('c', sol2, day2); // 1000 on day 2
-    await shoot('b', sol2, day2); // b total 1700
+    await fire('a', sol(), DAY); // 1000
+    await fire('b', miss(), DAY); await fire('b', sol(), DAY); // 700
+    await fire('c', sol2, day2); // 1000 on day 2
+    await fire('b', sol2, day2); // b total 1700
     const all = await leaderboard('c', 'all', day2);
     // every pilot gets their own place; a tie on points and games goes by name
     expect(all.top.map((e) => [e.rank, e.name, e.score, e.games])).toEqual([
@@ -434,6 +451,52 @@ describe('server game', () => {
     const d1 = await leaderboard(null, 'day', DAY);
     expect(d1.top.map((e) => e.name)).toEqual(['Ana', 'Bo']);
     expect(d1.me).toBeNull();
+  });
+
+  test('a scripted winning shot is rejected with a message and not counted', async () => {
+    await setName('g', 'Gil');
+    // no aiming on the board: the shot is turned away, and no shot is used up
+    await expect(shoot('g', sol(), DAY, {}, NOW)).rejects.toThrow('looks like a script');
+    await expect(shoot('g', sol(), DAY, { moves: 0 }, NOW)).rejects.toMatchObject({ status: 403 });
+    // a miss is never checked, so a quick test shot still counts as a shot
+    expect((await shoot('g', miss(), DAY, {}, NOW)).shot).toBe(1);
+    // winning within seconds of first seeing the board is too fast to be a person
+    await setName('h', 'Hal');
+    await today('h', DAY, NOW - 5_000);
+    await expect(shoot('h', sol(), DAY, { moves: 4 }, NOW)).rejects.toThrow('faster than a pilot');
+    // a pilot who opened the board long enough ago wins as normal
+    await setName('j', 'Jo');
+    await today('j', DAY, NOW - MIN_SOLVE_MS);
+    expect(await shoot('j', sol(), DAY, { moves: 4 }, NOW)).toMatchObject({ result: 'hit', shot: 1, score: 1000 });
+  });
+});
+
+describe('moon clock', () => {
+  const level = { ...FALLBACK_LEVEL(DAY), orbitPeriod: ORBIT_PERIOD };
+  const at = (sec: number) => NOW + sec * 1000;
+  test('the moons must be where the server clock has them', () => {
+    expect(() => checkClock(level, 30, false, at(30), null)).not.toThrow();
+    expect(() => checkClock(level, 30, false, at(30 + CLOCK_SLACK - 1), null)).not.toThrow();
+    expect(() => checkClock(level, 0, false, at(90), null)).toThrow('moons have moved');
+    // the clock wraps every period
+    expect(() => checkClock(level, 239, false, at(242), null)).not.toThrow();
+    // reduced motion runs the orbit clock at half speed
+    expect(() => checkClock(level, 15, true, at(30), null)).not.toThrow();
+    expect(() => checkClock(level, 15, false, at(30), null)).toThrow();
+    // firing again at the frozen moment of the last shot is fine
+    expect(() => checkClock(level, 0, false, at(90), 0)).not.toThrow();
+    // days without orbiting moons have no clock
+    expect(() => checkClock({ ...level, orbitPeriod: undefined }, undefined, false, at(90), null)).not.toThrow();
+  });
+  test('a shot sent with a stale moon clock is rejected', async () => {
+    setStoreForTests(new MemoryStore());
+    const day = '2099-02-01';
+    const l: Level = { ...FALLBACK_LEVEL(day), orbitPeriod: ORBIT_PERIOD };
+    await getStoreForTest().setCached(`level:v5:${day}`, JSON.stringify({ level: l, solution: { moon: { x: 10, z: 3 }, angle: 230 }, solutions: 1, attempts: 1 }), 60);
+    await setName('i', 'Ivo');
+    const p = { moon: l.moon.start, angle: l.moon.startAngle };
+    await expect(shoot('i', p, day, { moves: 1 }, at(100))).rejects.toThrow('moons have moved'); // t defaults to 0
+    expect((await shoot('i', { ...p, t: 100 }, day, { moves: 1 }, at(101))).shot).toBe(1);
   });
 });
 
