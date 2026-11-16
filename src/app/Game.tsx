@@ -22,6 +22,11 @@ async function api<T>(url: string, body?: unknown): Promise<T> {
 }
 
 const placementKey = (day: string) => `orbit:placement:${day}`;
+// how many times the pilot has dragged or turned something today; kept across reloads
+const movesKey = (day: string) => `orbit:moves:${day}`;
+function loadMoves(day: string): number {
+  try { return Math.max(0, Number(localStorage.getItem(movesKey(day))) || 0); } catch { return 0; }
+}
 function loadPlacement(level: Level): Placement {
   try {
     const raw = localStorage.getItem(placementKey(level.day));
@@ -156,6 +161,13 @@ export default function Game() {
   const [heldT, setHeldT] = useState<number | null>(null);
   const [status, setStatus] = useState<Status>({ text: START_TEXT });
   const pendingFire = useRef(false);
+  const moves = useRef(0);
+  const dayRef = useRef<string | null>(null);
+  const clockOffset = useRef(0);
+  const countMove = useCallback(() => {
+    moves.current++;
+    if (dayRef.current) try { localStorage.setItem(movesKey(dayRef.current), String(moves.current)); } catch { /* ignore */ }
+  }, []);
   // what is being played comes from the address (null while the page is rendered on the server)
   const search = useSyncExternalStore(subscribeUrl, () => location.search, () => null);
   const mode = useMemo(() => (search === null ? null : modeFromSearch(search)), [search]);
@@ -184,15 +196,15 @@ export default function Game() {
       if (disposed || !hostRef.current) return;
       try {
         sceneRef.current = new OrbitScene(hostRef.current, {
-          onDrag: (which, pos: Vec) => setPlacement((p) => {
+          onDrag: (which, pos: Vec) => { countMove(); setPlacement((p) => {
             if (!p) return p;
             return which === 'moon' ? { ...p, moon: pos } : { ...p, satellite: p.satellite ? { ...p.satellite, ...pos } : p.satellite };
-          }),
+          }); },
         });
       } catch { setGlError(true); }
     });
     return () => { disposed = true; sceneRef.current?.dispose(); sceneRef.current = null; };
-  }, []);
+  }, [countMove]);
 
   const go = useCallback((m: Mode) => {
     setMoreOpen(null); setResultOpen(false);
@@ -212,7 +224,10 @@ export default function Game() {
       beamFor.current = null; setHeldT(null);
       sceneRef.current?.clearBeam();
       loadedRef.current = shownKey; setLoadedFor(shownKey);
-      setData((d) => ({ level: lvl, me: { name: d?.me.name ?? null, play: p0, streak: d?.me.streak ?? { current: 0, best: 0 } }, archive: mode.kind === 'archive' }));
+      // drags and turns are counted per board (the server turns away wins nobody aimed)
+      dayRef.current = lvl.day;
+      moves.current = loadMoves(lvl.day);
+      setData((d) => ({ level: lvl, me: { name: d?.me.name ?? null, play: p0, streak: d?.me.streak ?? { current: 0, best: 0 } }, archive: mode.kind === 'archive', now: d?.now ?? Date.now() }));
       setPlay(p0);
       setStatus({ text: intro ?? START_TEXT });
       const { t, ...p } = loadPlacement(lvl);
@@ -239,6 +254,7 @@ export default function Game() {
       const day = mode.kind === 'archive' ? mode.day : undefined;
       api<TodayPayload>(`/api/today${day ? `?day=${day}` : ''}`).then((d) => {
         if (!live) return;
+        clockOffset.current = d.now - Date.now();
         setVoy(null);
         setName(d.me.name); setStreak(d.me.streak);
         show(d.level, d.me.play, pieceIntro(d.level, d.archive ? 'This day:' : 'Today:'));
@@ -263,6 +279,7 @@ export default function Game() {
   useEffect(() => {
     const s = sceneRef.current;
     if (!s || !level) return;
+    s.clockOffset = clockOffset.current;
     s.setLevel(level); s.frame();
   }, [sceneReady, level]);
 
@@ -272,7 +289,7 @@ export default function Game() {
   // orbiting moons: refresh the aiming line as they move, unless they are frozen for a beam on screen
   useEffect(() => {
     if (!level?.orbitPeriod || heldT !== null) return;
-    const tick = () => setOrbitT(sceneRef.current?.orbitTime() ?? orbitClock(level, Date.now()));
+    const tick = () => setOrbitT(sceneRef.current?.orbitTime() ?? orbitClock(level, Date.now() + clockOffset.current));
     tick();
     const id = setInterval(tick, 100);
     return () => clearInterval(id);
@@ -319,7 +336,7 @@ export default function Game() {
     const shot: Placement = level.orbitPeriod ? { ...placement, t } : placement;
     setHeldT(t); s?.holdOrbits(t);
     try {
-      const res = await api<{ result: TraceResult['result']; hitName: string | null; destroyed: number[]; score: number; status: Play['status']; play: Play; streak: Streak; pid: string }>('/api/shot', { placement: shot, ...(archiveDay ? { day: archiveDay } : {}) });
+      const res = await api<{ result: TraceResult['result']; hitName: string | null; destroyed: number[]; score: number; status: Play['status']; play: Play; streak: Streak; pid: string }>('/api/shot', { placement: shot, moves: moves.current, slow: s?.slowOrbits ?? false, ...(archiveDay ? { day: archiveDay } : {}) });
       savePid(res.pid);
       if (s) await s.fire(trace(withDestroyed(level, destroyed), shot), energized);
       beamFor.current = placement;
@@ -501,14 +518,14 @@ export default function Game() {
             <div className="dial">
               <label htmlFor="mirror">Moon mirror</label>
               <input type="range" id="mirror" min={0} max={359} value={placement.angle} disabled={!canAim || busy}
-                onChange={(e) => setPlacement({ ...placement, angle: +e.target.value })} />
+                onChange={(e) => { countMove(); setPlacement({ ...placement, angle: +e.target.value }); }} />
               <output htmlFor="mirror">{placement.angle}°</output>
             </div>
             {placement.satellite && (
               <div className="dial">
                 <label htmlFor="sat">Satellite</label>
                 <input type="range" id="sat" min={0} max={359} value={placement.satellite.angle} disabled={!canAim || busy}
-                  onChange={(e) => setPlacement({ ...placement, satellite: { ...placement.satellite!, angle: +e.target.value } })} />
+                  onChange={(e) => { countMove(); setPlacement({ ...placement, satellite: { ...placement.satellite!, angle: +e.target.value } }); }} />
                 <output htmlFor="sat">{placement.satellite.angle}°</output>
               </div>
             )}

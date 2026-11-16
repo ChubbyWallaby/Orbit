@@ -1,5 +1,9 @@
-// Deterministic daily level generator. The same day string always yields the same level,
-// and every generated level is checked by a solver to be winnable with a mirror bounce.
+// Deterministic daily level generator. The same day string (and seed secret) always yields the same
+// level, and every generated level is checked by a solver to be winnable with a mirror bounce.
+//
+// The source is public, so with the day alone anyone could run the generator and read the solution.
+// The server passes a secret (ORBIT_SEED_SECRET) that is mixed into every random stream, so only it
+// can build a day's board. Without a secret the output is the same as before, which keeps tests stable.
 import { constrainMoon, trace, MOON_MIRROR_OFFSET, type Body, type FixedMirror, type Level, type Placement, type Rock, type Splitter, type Vec, type Wormhole } from './engine';
 import { puzzleNumber } from './rules';
 
@@ -37,14 +41,17 @@ export type Feature = 'plain' | 'blackhole' | 'splitter' | 'wormhole' | 'mirrors
 
 export const NEW_POOL: Feature[] = ['blackhole', 'splitter', 'wormhole', 'mirrors', 'relay', 'repulsor', 'twin'];
 
+/** What the random streams are seeded from: the day alone, or the day plus the server's secret. */
+const seedKey = (day: string, secret = '') => (secret ? `${secret}|${day}` : day);
+
 /** The main special piece of the day. */
-export function featureFor(day: string): Feature {
-  return featuresFor(day)[0];
+export function featureFor(day: string, secret = ''): Feature {
+  return featuresFor(day, secret)[0];
 }
 
 /** Every special piece of the day, main piece first: usually one, sometimes two, rarely none. */
-export function featuresFor(day: string): Feature[] {
-  const r = rng(hash(`${day}:features`));
+export function featuresFor(day: string, secret = ''): Feature[] {
+  const r = rng(hash(`${seedKey(day, secret)}:features`));
   if (r() < 0.1) return ['plain'];
   const first = NEW_POOL[Math.floor(r() * NEW_POOL.length)];
   if (r() >= 0.4) return [first];
@@ -59,11 +66,14 @@ const placementOrder = (fs: Feature[]) => {
   return [...fs].sort((a, b) => rank(a) - rank(b));
 };
 
-/** Extra settings for Voyage levels. Daily levels use none, so they are unchanged. */
-export type Tuning = { mirror?: [number, number]; orbits?: boolean };
+/**
+ * Extra settings for Voyage levels; daily levels use none, so they are unchanged. `secret` is the
+ * server's seed secret, mixed into every random stream (daily levels only: Voyage levels are public).
+ */
+export type Tuning = { mirror?: [number, number]; orbits?: boolean; secret?: string };
 
 function buildCandidate(day: string, attempt: number, features: Feature[], tuning: Tuning = {}): Level {
-  const r = rng(hash(`${day}#${attempt}`));
+  const r = rng(hash(`${seedKey(day, tuning.secret)}#${attempt}`));
   const between = (a: number, b: number) => a + (b - a) * r();
   const pick = <T,>(arr: T[]) => arr[Math.floor(r() * arr.length)];
   const side = r() < 0.5 ? -1 : 1;
@@ -445,8 +455,8 @@ export const ORBIT_PERIOD = 240;
  * A planet keeps still moons if their orbit would cross the solution or the moon's start, or if
  * the start could then win on its own at some moment.
  */
-function addOrbits(day: string, level: Level, solution: Placement) {
-  const r = rng(hash(`${day}:orbits`));
+function addOrbits(day: string, level: Level, solution: Placement, secret: string) {
+  const r = rng(hash(`${seedKey(day, secret)}:orbits`));
   const systems = new Map<string, Body[]>();
   for (const b of level.bodies) {
     if (b.kind !== 'moonlet' || !b.orbit) continue;
@@ -470,8 +480,8 @@ function addOrbits(day: string, level: Level, solution: Placement) {
   if (!level.bodies.some((b) => b.orbit?.laps)) delete level.orbitPeriod;
 }
 
-export function generateLevel(day: string): Generated {
-  return generateFrom(day, featuresFor(day));
+export function generateLevel(day: string, secret = ''): Generated {
+  return generateFrom(day, featuresFor(day, secret), { secret });
 }
 
 /**
@@ -489,7 +499,7 @@ export function generateFrom(seed: string, features: Feature[], tuning: Tuning =
     // every board has at least two gravity bodies (giant or sun, plus a planet)
     if (!level.bodies.some((b) => b.kind === 'planet')) continue;
     const ok = validate(level);
-    if (ok && tuning.orbits !== false) addOrbits(seed, level, ok.solution);
+    if (ok && tuning.orbits !== false) addOrbits(seed, level, ok.solution, tuning.secret ?? '');
     if (ok) return { level, solution: ok.solution, solutions: ok.solutions, solvable: ok.solvable, attempts: attempt + 1 };
   }
   if (strict) return null;

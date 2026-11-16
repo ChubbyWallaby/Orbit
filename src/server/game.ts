@@ -1,5 +1,5 @@
 // Server-side game service. All score-affecting decisions happen here.
-import { constrainMoon, trace, withDestroyed, SATELLITE_RADIUS, type Level, type Placement, type Vec } from '@/game/engine';
+import { constrainMoon, orbitClock, trace, withDestroyed, SATELLITE_RADIUS, type Level, type Placement, type Vec } from '@/game/engine';
 import { generateLevel, type Generated } from '@/game/generate';
 import { HELPER_ORDER, LAUNCH_DAY, MAX_SHOTS, puzzleNumber, scoreFor, utcDay, type HelperId } from '@/game/rules';
 import { buildVoyageLevel, PREBUILT, voyageSpec, voyageStars } from '@/game/voyage';
@@ -18,8 +18,10 @@ export class GameError extends Error {
 }
 
 export type Me = { name: string | null; play: Play; streak: Streak };
-/** `archive`: a past day, played for fun. It does not count for the leaderboards or the streak. */
-export type TodayPayload = { level: Level; me: Me; archive: boolean };
+/**
+ * `archive`: a past day, played for fun. It does not count for the leaderboards or the streak.
+ * `now` is the server's clock, so the page can run the moons' orbit clock in step with it. */
+export type TodayPayload = { level: Level; me: Me; archive: boolean; now: number };
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** Which day a request is for: today's puzzle (ranked) unless a past day is asked for. */
@@ -39,6 +41,17 @@ export function cleanName(raw: unknown): string {
   return name;
 }
 
+let warnedNoSecret = false;
+/** Server-only secret mixed into the level seed, so the public generator cannot be run ahead of the server. */
+function seedSecret(): string {
+  const s = process.env.ORBIT_SEED_SECRET ?? '';
+  if (!s && process.env.VERCEL_ENV === 'production' && !warnedNoSecret) {
+    warnedNoSecret = true;
+    console.error('ORBIT_SEED_SECRET is not set: anyone can generate the daily level and its solution from the public source.');
+  }
+  return s;
+}
+
 // Each day's level is generated once, then cached in memory and in the store (generation can take seconds).
 const memo = new Map<string, Promise<Generated>>();
 export function levelFor(day: string): Promise<Generated> {
@@ -49,7 +62,7 @@ export function levelFor(day: string): Promise<Generated> {
       const key = `level:v5:${day}`; // v5: moons orbit
       const hit = await store.getCached(key);
       if (hit) return JSON.parse(hit) as Generated;
-      const fresh = generateLevel(day);
+      const fresh = generateLevel(day, seedSecret());
       // kept for years: past days stay playable in the archive, the same as everyone played them
       await store.setCached(key, JSON.stringify(fresh), 60 * 60 * 24 * 365 * 5);
       return fresh;
@@ -72,7 +85,7 @@ async function playFor(day: string, pid: string): Promise<Play> {
   return done ? { ...play, status: done.status, score: done.score } : play;
 }
 
-export async function today(pid: string | null, rawDay?: unknown): Promise<TodayPayload> {
+export async function today(pid: string | null, rawDay?: unknown, now = Date.now()): Promise<TodayPayload> {
   const { day, ranked } = resolveDay(rawDay);
   const { level } = await levelFor(day);
   const store = getStore();
@@ -80,7 +93,8 @@ export async function today(pid: string | null, rawDay?: unknown): Promise<Today
   const name = pid ? await store.getName(pid) : null;
   // the streak is about today: an archive day shows the streak as it stands now
   const streak = pid ? await store.getStreak(pid, currentDay()) : { current: 0, best: 0 };
-  return { level, me: { name, play, streak }, archive: !ranked };
+  if (pid && play.status === 'playing') await store.markSeen(day, pid, now);
+  return { level, me: { name, play, streak }, archive: !ranked, now };
 }
 
 export type ArchiveDay = { day: string; number: number } & ({ status: 'open' } | DayResult);
@@ -160,7 +174,42 @@ export function parsePlacement(level: Level, raw: unknown, helpers: HelperId[]):
   return { moon, angle, satellite, t: Math.round(t * 100) / 100 };
 }
 
-export async function shoot(pidIn: string | null, raw: unknown, rawDay?: unknown) {
+/** How far (in orbit seconds) a shot's moon clock may be from the server's: network delay and clock drift. */
+export const CLOCK_SLACK = 10;
+/** A win sooner than this after first seeing the board is faster than a person can aim. */
+export const MIN_SOLVE_MS = 20_000;
+
+/** The page's details about how a shot was aimed, sent alongside the placement. */
+export type ShotProof = { moves?: unknown; slow?: unknown };
+
+/**
+ * The moons must be where they really are when the shot is fired: the orbit clock the page shows is
+ * the server's (slowed to half for reduced motion). A shot may also repeat the frozen moment of the
+ * previous shot, which the page does when you fire again without moving anything.
+ */
+export function checkClock(level: Level, t: number | undefined, slow: boolean, now: number, lastT: number | null) {
+  const P = level.orbitPeriod;
+  if (!P || t === undefined) return;
+  if (lastT !== null && Math.abs(t - lastT) < 0.005) return;
+  const gap = Math.abs(t - orbitClock(level, now, slow ? 0.5 : 1));
+  if (Math.min(gap, P - gap) > CLOCK_SLACK) throw new GameError('The moons have moved since you aimed. Check your line and fire again.', 409);
+}
+
+/** Why a winning shot looks automated, or null. */
+export function suspicion(proof: ShotProof, seen: number | null, now: number): string | null {
+  const moves = proof.moves;
+  // the moon never starts on a winning spot, so a real win always needs at least one drag or turn
+  if (typeof moves !== 'number' || !Number.isFinite(moves) || moves < 1) return 'no-aiming';
+  if (seen !== null && now - seen < MIN_SOLVE_MS) return 'too-fast';
+  return null;
+}
+
+export const SCRIPT_MESSAGES: Record<string, string> = {
+  'no-aiming': 'Shot rejected: it was not aimed on the board, so it looks like a script. Drag the moon and turn its mirror yourself, then fire.',
+  'too-fast': 'Shot rejected: that was aimed faster than a pilot can, so it looks like a script. Take a moment to line it up, then fire again.',
+};
+
+export async function shoot(pidIn: string | null, raw: unknown, rawDay?: unknown, proof: ShotProof = {}, now = Date.now()) {
   const { day, ranked } = resolveDay(rawDay);
   const pid = await playerFor(pidIn, ranked);
   const store = getStore();
@@ -168,10 +217,20 @@ export async function shoot(pidIn: string | null, raw: unknown, rawDay?: unknown
   const play = await playFor(day, pid);
   if (play.status !== 'playing') throw new GameError(finishedText(ranked), 409);
   const placement = parsePlacement(level, raw, play.helpers);
+  const meta = await store.getShotMeta(day, pid);
+  checkClock(level, placement.t, proof.slow === true, now, meta.lastT);
+  const res = trace(withDestroyed(level, play.destroyed), placement);
+  // a winning shot that looks scripted is turned away before it counts (misses are never checked)
+  if (res.result === 'hit') {
+    const why = suspicion(proof, meta.seen, now);
+    if (why) {
+      console.warn(`[orbit] rejected automated-looking shot: day=${day} pid=${pid} reason=${why}`);
+      throw new GameError(SCRIPT_MESSAGES[why], 403);
+    }
+  }
   const shot = await store.reserveShot(day, pid);
   if (shot > MAX_SHOTS) throw new GameError(ranked ? 'No shots left today.' : 'No shots left on this puzzle.', 409);
-  const res = trace(withDestroyed(level, play.destroyed), placement);
-  await store.recordShot(day, pid, shot, res.result);
+  await store.recordShot(day, pid, shot, res.result, placement.t);
   // the energized laser blows up every asteroid the beam hits; they stay gone for later shots
   const destroyed = play.helpers.includes('energized') ? res.rocksHit : [];
   if (destroyed.length) await store.addDestroyed(day, pid, destroyed);
