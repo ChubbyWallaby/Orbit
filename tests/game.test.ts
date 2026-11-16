@@ -501,6 +501,7 @@ describe('moon clock', () => {
   test('a shot sent with a stale moon clock is rejected', async () => {
     setStoreForTests(new MemoryStore());
     const day = '2099-02-01';
+    setToday(day);
     const l: Level = { ...FALLBACK_LEVEL(day), orbitPeriod: ORBIT_PERIOD };
     await getStoreForTest().setCached(`level:v5:${day}`, JSON.stringify({ level: l, solution: { moon: { x: 10, z: 3 }, angle: 230 }, solutions: 1, attempts: 1 }), 60);
     await setName('i', 'Ivo');
@@ -512,8 +513,8 @@ describe('moon clock', () => {
 
 describe('archive', () => {
   let store: MemoryStore;
-  // a minute after the board was opened, with some aiming: not a script
-  const aimed = (pid: string, p: unknown, day?: string) => shoot(pid, p, day, { moves: 3 }, Date.now() + 60_000);
+  // aimed (some drags and turns), long after the board was opened, at the moons' starting moment
+  const aimed = (pid: string, p: unknown, day?: string) => shoot(pid, p, day, { moves: 3 }, NOW); // NOW: orbit time 0, long after the board was opened
   beforeEach(() => { store = new MemoryStore(); setStoreForTests(store); setToday('2026-11-12'); });
 
   test('which days can be played', () => {
