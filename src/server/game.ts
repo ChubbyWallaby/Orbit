@@ -4,7 +4,7 @@ import { generateLevel, type Generated } from '@/game/generate';
 import { HELPER_ORDER, LAUNCH_DAY, MAX_SHOTS, puzzleNumber, scoreFor, utcDay, type HelperId } from '@/game/rules';
 import { buildVoyageLevel, PREBUILT, voyageSpec, voyageStars } from '@/game/voyage';
 import prebuilt from '@/game/voyage-levels.json';
-import { getStore, nameKey, prevDay, type DayResult, type Play, type Streak } from './store';
+import { getStore, nameKey, prevDay, type DayResult, type Play, type Streak, type VoyageRow } from './store';
 
 /** Today's UTC day. Outside production, ORBIT_DAY=YYYY-MM-DD lets you play any day for testing. */
 export function currentDay(): string {
@@ -115,6 +115,8 @@ export async function setName(pid: string, raw: unknown) {
   const old = await store.getName(pid);
   await store.setName(pid, name);
   if (old && nameKey(old) !== nameKey(name)) await store.releaseName(pid, old);
+  // Voyage progress made before picking a name joins the Voyage board now
+  await syncVoyageScore(pid, await store.getVoyage(pid));
   return name;
 }
 
@@ -196,11 +198,11 @@ export function checkClock(level: Level, t: number | undefined, slow: boolean, n
 }
 
 /** Why a winning shot looks automated, or null. */
-export function suspicion(proof: ShotProof, seen: number | null, now: number): string | null {
+export function suspicion(proof: ShotProof, seen: number | null, now: number, minMs = MIN_SOLVE_MS): string | null {
   const moves = proof.moves;
   // the moon never starts on a winning spot, so a real win always needs at least one drag or turn
   if (typeof moves !== 'number' || !Number.isFinite(moves) || moves < 1) return 'no-aiming';
-  if (seen !== null && now - seen < MIN_SOLVE_MS) return 'too-fast';
+  if (seen !== null && now - seen < minMs) return 'too-fast';
   return null;
 }
 
@@ -286,10 +288,20 @@ const voyageInfo = (n: number): VoyageInfo => {
   const s = voyageSpec(n);
   return { chapter: s.chapter, scanner: s.scanner, pieces: s.features.filter((f) => f !== 'plain') };
 };
-export type VoyagePayload = { level: Level; n: number; unlocked: number; stars: Record<number, number>; shots: string[]; info: VoyageInfo };
+/** `now` is the server's clock, for the moons' orbit clock (as in TodayPayload). */
+export type VoyagePayload = { level: Level; n: number; unlocked: number; stars: Record<number, number>; shots: string[]; info: VoyageInfo; now: number; name: string | null };
+
+/** Voyage levels are quicker than a daily puzzle, so a win is only too fast under 10 seconds. */
+export const VOYAGE_MIN_SOLVE_MS = 10_000;
+const totalStars = (stars: Record<number, number>) => Object.values(stars).reduce((a, b) => a + b, 0);
+/** Named pilots with progress are on the Voyage board (unnamed ones join when they pick a name). */
+async function syncVoyageScore(pid: string, row: VoyageRow) {
+  const store = getStore();
+  if (row.unlocked > 1 && (await store.getName(pid))) await store.setVoyageScore(pid, totalStars(row.stars), row.unlocked - 1);
+}
 
 /** A Voyage level (by default the furthest one open) and the player's progress. */
-export async function voyage(pid: string | null, rawN?: unknown): Promise<VoyagePayload> {
+export async function voyage(pid: string | null, rawN?: unknown, now = Date.now()): Promise<VoyagePayload> {
   const row = pid ? await getStore().getVoyage(pid) : null;
   const unlocked = row?.unlocked ?? 1;
   const n = voyageNumber(rawN, unlocked);
@@ -298,10 +310,13 @@ export async function voyage(pid: string | null, rawN?: unknown): Promise<Voyage
   // an attempt that ended (a hit, or every shot used) is over: the level starts fresh
   const a = row?.attempt;
   const shots = a && a.n === n && a.shots.length < MAX_SHOTS && !a.shots.includes('hit') ? a.shots : [];
-  return { level, n, unlocked, stars: row?.stars ?? {}, shots, info: voyageInfo(n) };
+  // remember when the level was first opened, to turn away wins faster than a pilot can aim
+  if (pid && row && row.seen?.n !== n) await getStore().setVoyage(pid, { ...row, seen: { n, ms: now } });
+  const name = pid ? await getStore().getName(pid) : null;
+  return { level, n, unlocked, stars: row?.stars ?? {}, shots, info: voyageInfo(n), now, name };
 }
 
-export async function voyageShot(pidIn: string | null, rawN: unknown, raw: unknown) {
+export async function voyageShot(pidIn: string | null, rawN: unknown, raw: unknown, proof: ShotProof = {}, now = Date.now()) {
   const pid = await playerFor(pidIn, false);
   const store = getStore();
   const row = await store.getVoyage(pid);
@@ -309,9 +324,18 @@ export async function voyageShot(pidIn: string | null, rawN: unknown, raw: unkno
   if (n > row.unlocked) throw new GameError(`Clear level ${row.unlocked} first.`, 403);
   const { level } = await voyageLevelFor(n);
   const placement = parsePlacement(level, raw, []);
+  // the same checks as today's puzzle, now that Voyage has a leaderboard
+  checkClock(level, placement.t, proof.slow === true, now, row.attempt.n === n ? row.attempt.lastT ?? null : null);
+  const res = trace(level, placement);
+  if (res.result === 'hit') {
+    const why = suspicion(proof, row.seen?.n === n ? row.seen.ms : null, now, VOYAGE_MIN_SOLVE_MS);
+    if (why) {
+      console.warn(`[orbit] rejected automated-looking Voyage shot: level=${n} pid=${pid} reason=${why}`);
+      throw new GameError(SCRIPT_MESSAGES[why], 403);
+    }
+  }
   const prev = row.attempt.n === n ? row.attempt.shots : [];
   const shots = prev.length >= MAX_SHOTS || prev.includes('hit') ? [] : [...prev];
-  const res = trace(level, placement);
   shots.push(res.result);
   let status: Play['status'] = 'playing';
   let stars = 0;
@@ -321,12 +345,13 @@ export async function voyageShot(pidIn: string | null, rawN: unknown, raw: unkno
     row.stars[n] = Math.max(row.stars[n] ?? 0, stars);
     row.unlocked = Math.max(row.unlocked, n + 1);
   } else if (shots.length >= MAX_SHOTS) status = 'lost';
-  row.attempt = { n, shots };
+  row.attempt = { n, shots, ...(placement.t === undefined ? {} : { lastT: placement.t }) };
   await store.setVoyage(pid, row);
+  if (status === 'won') await syncVoyageScore(pid, row);
   return { result: res.result, bounces: res.bounces, hitName: res.hitName, shots, status, stars, best: row.stars[n] ?? 0, unlocked: row.unlocked, starsByLevel: row.stars };
 }
 
 export async function leaderboard(pid: string | null, scope: unknown, day = currentDay()) {
-  const s = scope === 'all' ? 'all' : 'day';
+  const s = scope === 'all' ? 'all' : scope === 'voyage' ? 'voyage' : 'day';
   return { scope: s, day, ...(await getStore().board(s, day, pid)) };
 }

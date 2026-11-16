@@ -239,6 +239,8 @@ export default function Game() {
     if (mode.kind === 'voyage') {
       const load = (n?: number): Promise<void> => api<VoyagePayload>(`/api/voyage${n ? `?n=${n}` : ''}`).then((v) => {
         if (!live) return;
+        clockOffset.current = v.now - Date.now();
+        setName(v.name);
         setVoy({ n: v.n, unlocked: v.unlocked, stars: v.stars, info: v.info });
         const shown: Mode = { kind: 'voyage', n: v.n };
         show(v.level, { ...freshPlay(), shots: v.shots }, `Level ${v.n} · ${v.info.chapter}. ${pieceIntro(v.level, 'New:') ?? START_TEXT}`, modeKey(shown));
@@ -374,7 +376,7 @@ export default function Game() {
     const shot: Placement = level.orbitPeriod ? { ...placement, t } : placement;
     setHeldT(t); s?.holdOrbits(t);
     try {
-      const res = await api<{ result: TraceResult['result']; hitName: string | null; shots: string[]; status: Play['status']; stars: number; best: number; unlocked: number; starsByLevel: Record<number, number>; pid: string }>('/api/voyage', { n: voy.n, placement: shot });
+      const res = await api<{ result: TraceResult['result']; hitName: string | null; shots: string[]; status: Play['status']; stars: number; best: number; unlocked: number; starsByLevel: Record<number, number>; pid: string }>('/api/voyage', { n: voy.n, placement: shot, moves: moves.current, slow: s?.slowOrbits ?? false });
       savePid(res.pid);
       if (s) await s.fire(trace(level, shot), false);
       beamFor.current = placement;
@@ -486,7 +488,7 @@ export default function Game() {
             {ranked && streak.current > 0 && <span className="chip streak" title={`Best streak: ${streak.best}`}>Streak {streak.current}</span>}
             {mode && !ranked && <button className="chip" onClick={() => go({ kind: 'daily' })}>Today</button>}
             <button className="chip more-chip" onClick={() => setMoreOpen(isVoyage ? 'voyage' : archiveDay ? 'archive' : 'voyage')}>More puzzles</button>
-            {!isVoyage && <button className="chip" onClick={() => setBoardOpen(true)}>Leaderboard</button>}
+            <button className="chip" onClick={() => setBoardOpen(true)}>Leaderboard</button>
           </div>
         </div>
       </header>
@@ -580,22 +582,25 @@ export default function Game() {
 
       {nameOpen && (
         <NameDialog
+          voyage={isVoyage}
           initial={name ?? ''}
           onDone={(n) => { setName(n); setNameOpen(false); if (pendingFire.current) { pendingFire.current = false; setStatus({ text: `Welcome aboard, ${n}. Press Fire when ready.` }); } }}
           onSkip={() => { setNameOpen(false); pendingFire.current = false; }}
         />
       )}
       {resultOpen && level && isVoyage && voy && play.status === 'won' && (
-        <VoyageResult n={voy.n} stars={play.score} onNext={() => go({ kind: 'voyage', n: voy.n + 1 })} onReplay={retryVoyage} onLevels={() => { setResultOpen(false); setMoreOpen('voyage'); }} onClose={() => setResultOpen(false)} />
+        <VoyageResult n={voy.n} stars={play.score} total={Object.values(voy.stars).reduce((a, b) => a + b, 0)} named={!!name}
+          onJoin={() => { setResultOpen(false); setNameOpen(true); }} onBoard={() => { setResultOpen(false); setBoardOpen(true); }} onNext={() => go({ kind: 'voyage', n: voy.n + 1 })} onReplay={retryVoyage} onLevels={() => { setResultOpen(false); setMoreOpen('voyage'); }} onClose={() => setResultOpen(false)} />
       )}
       {resultOpen && level && !isVoyage && <ResultCard level={level} play={play} streak={streak} practice={practice} archive={!!archiveDay} onPractice={startPractice} onMore={() => { setResultOpen(false); setMoreOpen(archiveDay ? 'archive' : 'voyage'); }} onClose={() => setResultOpen(false)} onBoard={() => { setResultOpen(false); setBoardOpen(true); }} />}
-      {boardOpen && <Leaderboard puzzleNumber={ranked ? level?.number ?? 1 : undefined} onClose={() => setBoardOpen(false)} />}
+      {boardOpen && <Leaderboard puzzleNumber={ranked ? level?.number ?? 1 : undefined} initial={isVoyage ? 'voyage' : 'all'}
+        onJoin={name ? undefined : () => { setBoardOpen(false); setNameOpen(true); }} onClose={() => setBoardOpen(false)} />}
       {moreOpen && mode && <MorePuzzles initial={moreOpen} mode={mode} onGo={go} onClose={() => setMoreOpen(null)} />}
     </>
   );
 }
 
-function NameDialog({ initial, onDone, onSkip }: { initial: string; onDone: (name: string) => void; onSkip: () => void }) {
+function NameDialog({ initial, voyage, onDone, onSkip }: { initial: string; voyage?: boolean; onDone: (name: string) => void; onSkip: () => void }) {
   const [value, setValue] = useState(initial);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -609,21 +614,21 @@ function NameDialog({ initial, onDone, onSkip }: { initial: string; onDone: (nam
   return (
     <div className="overlay">
       <form className="card" onSubmit={submit} aria-labelledby="introTitle">
-        <h2 id="introTitle">One puzzle a day</h2>
-        <ol>
+        <h2 id="introTitle">{voyage ? 'Join the leaderboard' : 'One puzzle a day'}</h2>
+        {voyage ? <p>Pick a pilot name to put your Voyage stars on the leaderboard. Stars you already earned count too.</p> : <ol>
           <li><b>Drag the moon</b> and <b>turn its mirror</b> so the laser bounces into the green beacon.</li>
           <li>Light bends near planets. The dashed line only shows the start of the beam.</li>
           <li>You get <b>3 shots</b>: a hit scores 1,000, 700 or 400. Helpers cost points.</li>
           <li>Everyone plays the same puzzle. Points add up on the all-time leaderboard.</li>
           <li>Want more? <b>Voyage</b> is an endless run of levels, and <b>past days</b> stay playable.</li>
-        </ol>
+        </ol>}
         <div className="field">
           <label htmlFor="pilot">Pilot name for the leaderboard</label>
           <input id="pilot" autoFocus maxLength={16} value={value} onChange={(e) => setValue(e.target.value)} placeholder="e.g. Nova" autoComplete="nickname" />
         </div>
         {error && <p className="err">{error}</p>}
         <div className="row">
-          <button type="button" className="btn" onClick={onSkip}>Look around first</button>
+          <button type="button" className="btn" onClick={onSkip}>{voyage ? 'Not now' : 'Look around first'}</button>
           <button type="submit" className="btn primary" disabled={saving || value.trim().length < 2}>{saving ? 'Saving…' : 'Start playing'}</button>
         </div>
       </form>
@@ -686,7 +691,7 @@ function ResultCard({ level, play, streak, practice, archive, onPractice, onMore
   );
 }
 
-function VoyageResult({ n, stars, onNext, onReplay, onLevels, onClose }: { n: number; stars: number; onNext: () => void; onReplay: () => void; onLevels: () => void; onClose: () => void }) {
+function VoyageResult({ n, stars, total, named, onJoin, onBoard, onNext, onReplay, onLevels, onClose }: { n: number; stars: number; total: number; named: boolean; onJoin: () => void; onBoard: () => void; onNext: () => void; onReplay: () => void; onLevels: () => void; onClose: () => void }) {
   const [copied, setCopied] = useState('Copy result');
   const copy = () => {
     track('shared', { result: 'voyage' });
@@ -697,7 +702,10 @@ function VoyageResult({ n, stars, onNext, onReplay, onLevels, onClose }: { n: nu
       <div className="card win" role="dialog" aria-labelledby="voyTitle">
         <h2 id="voyTitle">Level {n} cleared</h2>
         <div className="big stars" aria-label={`${stars} of 3 stars`}>{starText(stars)}</div>
-        <p>{stars === 3 ? 'First shot. Perfect.' : `Clear it on the ${stars === 2 ? 'first shot' : 'first or second shot'} for more stars, or keep going.`}</p>
+        <p>{stars === 3 ? 'First shot. Perfect.' : `Clear it on the ${stars === 2 ? 'first shot' : 'first or second shot'} for more stars, or keep going.`} {total} {total === 1 ? 'star' : 'stars'} in all.</p>
+        {named
+          ? <button className="btn" onClick={onBoard}>Voyage leaderboard</button>
+          : <button className="btn more-cta" onClick={onJoin}>Pick a pilot name to join the Voyage leaderboard</button>}
         <button className="btn primary" autoFocus onClick={onNext}>Next level</button>
         <div className="row">
           <button className="btn" onClick={onReplay}>Replay</button>

@@ -7,14 +7,16 @@ import { MAX_SHOTS } from './rules';
 /** The pieces Deep Space levels pick from (the same as daily levels). */
 const POOL: Feature[] = ['blackhole', 'splitter', 'wormhole', 'mirrors', 'relay', 'repulsor', 'twin'];
 
-/** How hard a level should be, measured by how many winning shots the solver found (fewer is harder). */
-export type Target = 'easy' | 'normal' | 'hard';
 
 export type VoyageSpec = {
   chapter: string;
   features: Feature[];
   tuning: Tuning;
-  target: Target;
+  /**
+   * How many winning shots the level should have (the solver finds up to about 30 per laser station).
+   * Fewer is harder: the curve falls steadily, and rises again for the first level of a new chapter.
+   */
+  target: number;
   /** The aiming line reaches as far as with the long-range scanner, for free. */
   scanner: boolean;
 };
@@ -57,8 +59,8 @@ export function voyageSpec(n: number): VoyageSpec {
         orbits: n >= 13,
         mirror: n <= 3 ? [1.7, 1.9] : n <= 6 ? [1.4, 1.9] : undefined,
       },
-      // the first two chapters stay gentle: nobody should get stuck while learning to aim
-      target: (n <= 6 ? (['easy', 'easy', 'normal'] as const) : (['easy', 'normal', 'hard'] as const))[step],
+      // each chapter starts easier than the last one ended, then tightens; the first two stay gentle
+      target: Math.round(30 - (n - 1) * 0.6 - step * (n <= 6 ? 3 : 4)),
       scanner: n <= 6,
     };
   }
@@ -73,7 +75,8 @@ export function voyageSpec(n: number): VoyageSpec {
     chapter: 'Deep space',
     features,
     tuning: { orbits: true, mirror: small ? [1.1, 1.4] : undefined },
-    target: n % 5 === 0 ? 'hard' : n % 5 === 1 ? 'easy' : 'normal',
+    // a slow slide from about 12 winning shots towards 4, with an easier level every 5 and a harder one too
+    target: Math.max(3, Math.round(Math.max(4, 12 - (n - DEEP_SPACE) * 0.12) + (n % 5 === 1 ? 6 : n % 5 === 0 ? -3 : 0))),
     scanner: false,
   };
 }

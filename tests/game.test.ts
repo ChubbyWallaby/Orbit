@@ -4,7 +4,7 @@ import { generateLevel, featuresFor, FALLBACK_LEVEL, ORBIT_PERIOD } from '@/game
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
 import { MemoryStore, getStore as getStoreForTest, setStoreForTests, nextStreak, liveStreak, rankEntries, windowStart } from '@/server/store';
 import { isJsonRequest, pickPid, pidCookieOptions } from '@/server/pid';
-import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, archive, checkClock, resolveDay, voyage, voyageShot, voyageLevelFor, GameError, CLOCK_SLACK, MIN_SOLVE_MS } from '@/server/game';
+import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, archive, checkClock, resolveDay, voyage, voyageShot, voyageLevelFor, GameError, VOYAGE_MIN_SOLVE_MS, CLOCK_SLACK, MIN_SOLVE_MS } from '@/server/game';
 import { voyageSpec, voyageStars, PREBUILT } from '@/game/voyage';
 import prebuilt from '@/game/voyage-levels.json';
 
@@ -557,7 +557,10 @@ describe('archive', () => {
 });
 
 describe('voyage', () => {
-  beforeEach(() => { setStoreForTests(new MemoryStore()); });
+  let store: MemoryStore;
+  beforeEach(() => { store = new MemoryStore(); setStoreForTests(store); });
+  // an aimed shot, long after the level was opened
+  const vshot = (pid: string | null, n: number, p: unknown) => voyageShot(pid, n, p, { moves: 3 }, NOW);
 
   test('prebuilt levels are numbered, solvable with a mirror bounce, and have their chapter piece', () => {
     const levels = prebuilt as unknown as import('@/game/generate').Generated[];
@@ -585,6 +588,13 @@ describe('voyage', () => {
     });
   });
 
+  test('the curve: winning shots to aim for fall steadily, and rise at each new chapter', () => {
+    expect(voyageSpec(1).target).toBe(30);
+    expect(voyageSpec(7).target).toBeGreaterThan(voyageSpec(6).target);
+    for (const n of [8, 9, 27, 29]) expect(voyageSpec(n).target, `level ${n}`).toBeLessThan(voyageSpec(n - 1).target + 1);
+    for (let n = 1; n <= 200; n++) expect(voyageSpec(n).target, `level ${n}`).toBeGreaterThanOrEqual(3);
+  });
+
   test('the curve: one new piece per chapter, then two pieces and smaller mirrors in deep space', () => {
     expect(voyageSpec(1)).toMatchObject({ chapter: 'First light', features: ['plain'], scanner: true });
     expect(voyageSpec(7).features).toEqual(['blackhole']);
@@ -601,21 +611,55 @@ describe('voyage', () => {
     const miss = { moon: one.level.moon.start, angle: one.level.moon.startAngle };
     expect((await voyage(null)).n).toBe(1);
     await expect(voyage('v', 2)).rejects.toThrow('Clear level 1 first');
-    await expect(voyageShot('v', 2, one.solution)).rejects.toThrow('Clear level 1 first');
-    await voyageShot('v', 1, miss);
+    await expect(vshot('v', 2, one.solution)).rejects.toThrow('Clear level 1 first');
+    await vshot('v', 1, miss);
     expect((await voyage('v', 1)).shots).toHaveLength(1); // an attempt in progress is kept
-    await voyageShot('v', 1, miss);
-    expect(await voyageShot('v', 1, miss)).toMatchObject({ status: 'lost', stars: 0, unlocked: 1 });
+    await vshot('v', 1, miss);
+    expect(await vshot('v', 1, miss)).toMatchObject({ status: 'lost', stars: 0, unlocked: 1 });
     expect((await voyage('v', 1)).shots).toEqual([]); // the next attempt starts fresh
-    expect(await voyageShot('v', 1, one.solution)).toMatchObject({ result: 'hit', status: 'won', stars: 3, unlocked: 2 });
+    expect(await vshot('v', 1, one.solution)).toMatchObject({ result: 'hit', status: 'won', stars: 3, unlocked: 2 });
     expect((await voyage('v')).n).toBe(2); // continues at the furthest level
     // replaying for fewer stars keeps the best
-    await voyageShot('v', 1, miss);
-    await voyageShot('v', 1, one.solution);
+    await vshot('v', 1, miss);
+    await vshot('v', 1, one.solution);
     expect((await voyage('v', 1)).stars).toEqual({ 1: 3 });
-    await expect(voyageShot(null, 1, one.solution)).rejects.toThrow('Could not tell who you are');
+    await expect(vshot(null, 1, one.solution)).rejects.toThrow('Could not tell who you are');
+  });
+
+  test('wins need aiming and time, like the daily puzzle', async () => {
+    const one = await voyageLevelFor(1);
+    await voyage('s', 1, NOW); // opened at NOW
+    await expect(voyageShot('s', 1, one.solution, { moves: 0 }, NOW + 60_000)).rejects.toThrow('looks like a script');
+    await expect(voyageShot('s', 1, one.solution, { moves: 2 }, NOW + 5_000)).rejects.toMatchObject({ status: 403 });
+    expect((await voyage('s', 1)).shots).toEqual([]); // turned-away shots are not used up
+    expect(await voyageShot('s', 1, one.solution, { moves: 2 }, NOW + VOYAGE_MIN_SOLVE_MS)).toMatchObject({ status: 'won', stars: 3 });
+  });
+
+  test('the Voyage board ranks named pilots by stars, then levels cleared', async () => {
+    const lv = await Promise.all([1, 2, 3].map(voyageLevelFor));
+    const miss = (i: number) => ({ moon: lv[i].level.moon.start, angle: lv[i].level.moon.startAngle });
+    await setName('a', 'Ana'); await setName('b', 'Bo');
+    // Ana: levels 1 and 2 on the first shot (6 stars)
+    await vshot('a', 1, lv[0].solution); await vshot('a', 2, lv[1].solution);
+    // Bo: level 1 first shot, 2 and 3 on the second shot (3 + 2 + 2 = 7 stars)
+    await vshot('b', 1, lv[0].solution);
+    await vshot('b', 2, miss(1)); await vshot('b', 2, lv[1].solution);
+    await vshot('b', 3, miss(2)); await vshot('b', 3, lv[2].solution);
+    // Cy plays without a name: not on the board until picking one
+    await vshot('c', 1, lv[0].solution); await vshot('c', 2, lv[1].solution);
+    let b = await leaderboard('c', 'voyage');
+    expect(b.top.map((e) => [e.rank, e.name, e.score, e.games])).toEqual([[1, 'Bo', 7, 3], [2, 'Ana', 6, 2]]);
+    expect(b.me).toBeNull();
+    await setName('c', 'Cy');
+    b = await leaderboard('c', 'voyage');
+    // Cy ties Ana on stars and levels, so the name decides
+    expect(b.top.map((e) => e.name)).toEqual(['Bo', 'Ana', 'Cy']);
+    expect(b.me).toMatchObject({ rank: 3, score: 6, games: 2, you: true });
+    // Voyage stars never reach the daily boards
+    expect(store.allBoard.size).toBe(0);
   });
 });
+
 
 describe('player id in iframes', () => {
   const A = '11111111-1111-4111-8111-111111111111';
