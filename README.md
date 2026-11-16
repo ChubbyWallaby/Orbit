@@ -31,14 +31,15 @@ Shots from scripts are turned away. The page runs the moons on the server's cloc
 
 ## More puzzles
 
-After today's puzzle, **More puzzles** offers two ways to keep playing. Neither counts for the leaderboards or the streak.
+After today's puzzle, **More puzzles** offers two ways to keep playing. Neither counts for the daily leaderboards or the streak; Voyage has a leaderboard of its own.
 
 - **Past days**: every earlier daily puzzle, playable once each if you haven't finished it (`?day=YYYY-MM-DD`). Helpers work as usual, and the result is marked "(archive)" when shared.
-- **Voyage**: numbered levels, the same for everyone, that get harder as you go (`?voyage=N`). Each level gives 3 shots; a hit earns 3, 2 or 1 stars, opens the next level, and you can retry or replay any open level. Progress is saved on the server.
+- **Voyage**: numbered levels, the same for everyone, that get harder as you go (`?voyage=N`). Each level gives 3 shots; a hit earns 3, 2 or 1 stars, opens the next level, and you can retry or replay any open level. Progress is saved on the server. The **Voyage leaderboard** ranks named pilots by total stars (best run per level), then by levels cleared; stars earned before picking a name count once you pick one. Voyage wins get the same script checks as daily wins, except a win only counts as too fast under 10 seconds after opening the level.
   - Levels 1–6 are plain boards with a wide mirror and a long aiming line; moons stand still until level 13.
-  - Levels 7–27 bring in one piece per chapter of three (black holes, fixed mirrors, repulsors, wormholes, splitters, fading light, twin stations), ordered easiest to hardest by how many winning shots the solver finds.
+  - Levels 7–27 bring in one piece per chapter of three (black holes, fixed mirrors, repulsors, wormholes, splitters, fading light, twin stations).
+  - Difficulty is measured by how many winning shots the solver finds (fewer is harder). Each level has a target that falls steadily from 30 at level 1 to about 6 at level 27, rising again at the start of each chapter, then slides from about 12 towards 4 in Deep Space with an easier level every five. The builder makes 5 boards per level and keeps the one closest to the target.
   - From level 28, Deep Space mixes pieces: two pieces sometimes from 45 and always from 70, and smaller mirrors from 50. It never ends.
-  - Levels 1–60 are prebuilt in `src/game/voyage-levels.json` (rebuild with `npx tsx scripts/build-voyage.ts`, about 10 minutes). Later levels are generated the first time someone reaches them and kept in the store.
+  - Levels 1–60 are prebuilt in `src/game/voyage-levels.json` (rebuild with `npx tsx scripts/build-voyage.ts`, about 25 minutes). Later levels are generated the first time someone reaches them and kept in the store.
 
 ## Project layout
 

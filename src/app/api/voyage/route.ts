@@ -15,8 +15,8 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: Request) {
   return handle(async () => {
-    const { n, placement } = await body(req);
+    const { n, placement, moves, slow } = await body(req);
     const pid = await ensurePid();
-    return { ...(await voyageShot(pid, n, placement)), pid };
+    return { ...(await voyageShot(pid, n, placement, { moves, slow })), pid };
   });
 }

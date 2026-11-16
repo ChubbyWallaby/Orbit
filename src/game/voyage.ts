@@ -12,9 +12,9 @@ export function asVoyageLevel(g: Generated, n: number): Generated {
 
 /**
  * Builds Voyage level `n`: tries a few seeds and keeps the one whose solution count suits the level's
- * target. Takes seconds per candidate, so levels up to PREBUILT are built ahead (scripts/build-voyage.ts).
+ * target number of winning shots. Takes seconds per candidate, so levels up to PREBUILT are built ahead (scripts/build-voyage.ts).
  */
-export function buildVoyageLevel(n: number, candidates = 3): Generated {
+export function buildVoyageLevel(n: number, candidates = 5): Generated {
   const spec = voyageSpec(n);
   const found: Generated[] = [];
   for (let k = 0; k < candidates * 3 && found.length < candidates; k++) {
@@ -23,8 +23,9 @@ export function buildVoyageLevel(n: number, candidates = 3): Generated {
   }
   // a piece that would not fit any board: fall back to the usual rules, which may drop it
   if (!found.length) return asVoyageLevel(generateFrom(`voyage:${n}`, spec.features, spec.tuning), n);
-  found.sort((a, b) => b.solutions - a.solutions); // easiest first
-  const pick = spec.target === 'easy' ? found[0] : spec.target === 'hard' ? found[found.length - 1] : found[Math.floor(found.length / 2)];
+  // the board closest to the target; on a tie, the easier one
+  const off = (g: Generated) => Math.abs(g.solutions - spec.target);
+  const pick = found.reduce((best, g) => (off(g) < off(best) || (off(g) === off(best) && g.solutions > best.solutions) ? g : best));
   return asVoyageLevel(pick, n);
 }
 
