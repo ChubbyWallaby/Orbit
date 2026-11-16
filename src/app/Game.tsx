@@ -21,6 +21,11 @@ async function api<T>(url: string, body?: unknown): Promise<T> {
 }
 
 const placementKey = (day: string) => `orbit:placement:${day}`;
+// how many times the pilot has dragged or turned something today; kept across reloads
+const movesKey = (day: string) => `orbit:moves:${day}`;
+function loadMoves(day: string): number {
+  try { return Math.max(0, Number(localStorage.getItem(movesKey(day))) || 0); } catch { return 0; }
+}
 function loadPlacement(level: Level): Placement {
   try {
     const raw = localStorage.getItem(placementKey(level.day));
@@ -125,6 +130,13 @@ export default function Game() {
   const [heldT, setHeldT] = useState<number | null>(null);
   const [status, setStatus] = useState<Status>({ text: START_TEXT });
   const pendingFire = useRef(false);
+  const moves = useRef(0);
+  const dayRef = useRef<string | null>(null);
+  const clockOffset = useRef(0);
+  const countMove = useCallback(() => {
+    moves.current++;
+    if (dayRef.current) try { localStorage.setItem(movesKey(dayRef.current), String(moves.current)); } catch { /* ignore */ }
+  }, []);
 
   const level = data?.level ?? null;
   const finished = play.status !== 'playing';
@@ -140,19 +152,22 @@ export default function Game() {
       if (disposed || !hostRef.current) return;
       try {
         sceneRef.current = new OrbitScene(hostRef.current, {
-          onDrag: (which, pos: Vec) => setPlacement((p) => {
+          onDrag: (which, pos: Vec) => { countMove(); setPlacement((p) => {
             if (!p) return p;
             return which === 'moon' ? { ...p, moon: pos } : { ...p, satellite: p.satellite ? { ...p.satellite, ...pos } : p.satellite };
-          }),
+          }); },
         });
       } catch { setGlError(true); }
     });
     return () => { disposed = true; sceneRef.current?.dispose(); sceneRef.current = null; };
-  }, []);
+  }, [countMove]);
 
   // load today's puzzle
   useEffect(() => {
     api<TodayPayload>('/api/today').then((d) => {
+      clockOffset.current = d.now - Date.now();
+      dayRef.current = d.level.day;
+      moves.current = loadMoves(d.level.day);
       setData(d); setPlay(d.me.play); setName(d.me.name); setStreak(d.me.streak);
       const intro = pieceIntro(d.level);
       if (intro) setStatus({ text: intro });
@@ -177,6 +192,7 @@ export default function Game() {
   useEffect(() => {
     const s = sceneRef.current;
     if (!s || !level) return;
+    s.clockOffset = clockOffset.current;
     s.setLevel(level); s.frame();
   }, [sceneReady, level]);
 
@@ -186,7 +202,7 @@ export default function Game() {
   // orbiting moons: refresh the aiming line as they move, unless they are frozen for a beam on screen
   useEffect(() => {
     if (!level?.orbitPeriod || heldT !== null) return;
-    const tick = () => setOrbitT(sceneRef.current?.orbitTime() ?? orbitClock(level, Date.now()));
+    const tick = () => setOrbitT(sceneRef.current?.orbitTime() ?? orbitClock(level, Date.now() + clockOffset.current));
     tick();
     const id = setInterval(tick, 100);
     return () => clearInterval(id);
@@ -233,7 +249,7 @@ export default function Game() {
     const shot: Placement = level.orbitPeriod ? { ...placement, t } : placement;
     setHeldT(t); s?.holdOrbits(t);
     try {
-      const res = await api<{ result: TraceResult['result']; hitName: string | null; destroyed: number[]; score: number; status: Play['status']; play: Play; streak: Streak }>('/api/shot', { placement: shot });
+      const res = await api<{ result: TraceResult['result']; hitName: string | null; destroyed: number[]; score: number; status: Play['status']; play: Play; streak: Streak }>('/api/shot', { placement: shot, moves: moves.current, slow: s?.slowOrbits ?? false });
       if (s) await s.fire(trace(withDestroyed(level, destroyed), shot), energized);
       beamFor.current = placement;
       setPlay(res.play);
@@ -363,14 +379,14 @@ export default function Game() {
             <div className="dial">
               <label htmlFor="mirror">Moon mirror</label>
               <input type="range" id="mirror" min={0} max={359} value={placement.angle} disabled={!canAim || busy}
-                onChange={(e) => setPlacement({ ...placement, angle: +e.target.value })} />
+                onChange={(e) => { countMove(); setPlacement({ ...placement, angle: +e.target.value }); }} />
               <output htmlFor="mirror">{placement.angle}°</output>
             </div>
             {placement.satellite && (
               <div className="dial">
                 <label htmlFor="sat">Satellite</label>
                 <input type="range" id="sat" min={0} max={359} value={placement.satellite.angle} disabled={!canAim || busy}
-                  onChange={(e) => setPlacement({ ...placement, satellite: { ...placement.satellite!, angle: +e.target.value } })} />
+                  onChange={(e) => { countMove(); setPlacement({ ...placement, satellite: { ...placement.satellite!, angle: +e.target.value } }); }} />
                 <output htmlFor="sat">{placement.satellite.angle}°</output>
               </div>
             )}

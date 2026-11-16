@@ -9,6 +9,8 @@ export type PlayStatus = 'playing' | 'won' | 'lost';
 export type Play = { shots: string[]; helpers: HelperId[]; status: PlayStatus; score: number; destroyed: number[] };
 export type BoardEntry = { rank: number; name: string; score: number; games: number; best: number; you: boolean };
 export type Streak = { current: number; best: number };
+/** Server-only facts about a play, kept out of `Play` so they are never sent to the browser. */
+export type ShotMeta = { seen: number | null; lastT: number | null };
 
 export interface Store {
   getName(pid: string): Promise<string | null>;
@@ -22,7 +24,11 @@ export interface Store {
   addDestroyed(day: string, pid: string, rocks: number[]): Promise<void>;
   /** Atomically reserves the next shot. Returns the 1-based shot number. */
   reserveShot(day: string, pid: string): Promise<number>;
-  recordShot(day: string, pid: string, shot: number, result: string): Promise<void>;
+  /** `t` is the orbit time the shot was traced at, so the same frozen moment can be fired again. */
+  recordShot(day: string, pid: string, shot: number, result: string, t?: number): Promise<void>;
+  /** Remembers when this player first saw today's board (only the first call counts). */
+  markSeen(day: string, pid: string, ms: number): Promise<void>;
+  getShotMeta(day: string, pid: string): Promise<ShotMeta>;
   /** Finishes the day once. Returns false if it was already finished. */
   finish(day: string, pid: string, status: 'won' | 'lost', score: number): Promise<boolean>;
   /** The top 10, plus the block of 10 around `pid` when they rank lower (see `windowStart`). */
@@ -116,9 +122,17 @@ class RedisStore implements Store {
     if (n === 1) await this.r.expire(k.shots(day, pid), DAY_TTL);
     return n;
   }
-  async recordShot(day: string, pid: string, shot: number, result: string) {
-    await this.r.hset(k.play(day, pid), { [`shot${shot}`]: result });
+  async recordShot(day: string, pid: string, shot: number, result: string, t?: number) {
+    await this.r.hset(k.play(day, pid), { [`shot${shot}`]: result, ...(t === undefined ? {} : { lastT: t }) });
     await this.r.expire(k.play(day, pid), DAY_TTL);
+  }
+  async markSeen(day: string, pid: string, ms: number) {
+    if (await this.r.hsetnx(k.play(day, pid), 'seen', ms)) await this.r.expire(k.play(day, pid), DAY_TTL);
+  }
+  async getShotMeta(day: string, pid: string): Promise<ShotMeta> {
+    const [seen, lastT] = await this.r.hmget<Record<string, unknown>>(k.play(day, pid), 'seen', 'lastT').then((h) => [h?.seen, h?.lastT]);
+    const num = (v: unknown) => (v === null || v === undefined || v === '' ? null : Number(v));
+    return { seen: num(seen), lastT: num(lastT) };
   }
   async finish(day: string, pid: string, status: 'won' | 'lost', score: number) {
     const first = await this.r.set(k.done(day, pid), 1, { nx: true, ex: DAY_TTL });
@@ -256,7 +270,19 @@ export class MemoryStore implements Store {
     this.shotCounters.set(key, n);
     return n;
   }
-  async recordShot(day: string, pid: string, shot: number, result: string) { this.play(day, pid).shots[shot - 1] = result; }
+  meta = new Map<string, ShotMeta>();
+  private metaFor(day: string, pid: string) {
+    const key = `${day}:${pid}`;
+    let m = this.meta.get(key);
+    if (!m) { m = { seen: null, lastT: null }; this.meta.set(key, m); }
+    return m;
+  }
+  async recordShot(day: string, pid: string, shot: number, result: string, t?: number) {
+    this.play(day, pid).shots[shot - 1] = result;
+    if (t !== undefined) this.metaFor(day, pid).lastT = t;
+  }
+  async markSeen(day: string, pid: string, ms: number) { const m = this.metaFor(day, pid); m.seen ??= ms; }
+  async getShotMeta(day: string, pid: string) { return { ...this.metaFor(day, pid) }; }
   async finish(day: string, pid: string, status: 'won' | 'lost', score: number) {
     const key = `${day}:${pid}`;
     if (this.done.has(key)) return false;
@@ -269,6 +295,7 @@ export class MemoryStore implements Store {
     this.streaks.set(pid, nextStreak(this.streaks.get(pid) ?? null, day, status === 'won'));
     return true;
   }
+
   async board(scope: 'day' | 'all', day: string, pid: string | null) {
     const m = scope === 'day' ? this.dayBoards.get(day) ?? new Map<string, number>() : this.allBoard;
     const ranked = rankEntries([...m.entries()].map(([id, score]): BoardEntry => ({

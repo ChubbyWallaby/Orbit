@@ -177,6 +177,10 @@ export class OrbitScene {
   private satellitePos: Vec | null = null;
   private reduceMotion = typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches;
   locked = false;
+  /** Server clock minus this device's clock, so the moons sit where the server says they are. */
+  clockOffset = 0;
+  /** Reduced motion runs the orbit clock at half speed; the server needs to know to check the shot. */
+  get slowOrbits() { return this.reduceMotion; }
 
   constructor(private host: HTMLElement, private cb: SceneCallbacks) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -605,7 +609,7 @@ export class OrbitScene {
   /** The orbit time on screen: the shared clock, or the moment a shot was fired while its beam shows. */
   orbitTime(): number {
     if (!this.level) return 0;
-    return this.orbitHold ?? orbitClock(this.level, Date.now(), this.reduceMotion ? 0.5 : 1);
+    return this.orbitHold ?? orbitClock(this.level, Date.now() + this.clockOffset, this.reduceMotion ? 0.5 : 1);
   }
 
   /** Freezes the orbiting moons at orbit time `t` (null lets them move again). */

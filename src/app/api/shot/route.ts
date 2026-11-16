@@ -3,7 +3,7 @@ import { body, handle, readPid } from '@/server/http';
 
 export async function POST(req: Request) {
   return handle(async () => {
-    const { placement } = await body(req);
-    return shoot(await readPid(), placement);
+    const { placement, moves, slow } = await body(req);
+    return shoot(await readPid(), placement, undefined, { moves, slow });
   });
 }
