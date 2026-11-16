@@ -44,6 +44,9 @@ export const NEW_POOL: Feature[] = ['blackhole', 'splitter', 'wormhole', 'mirror
 /** What the random streams are seeded from: the day alone, or the day plus the server's secret. */
 const seedKey = (day: string, secret = '') => (secret ? `${secret}|${day}` : day);
 
+/** What the random streams are seeded from: the day alone, or the day plus the server's secret. */
+const seedKey = (day: string, secret = '') => (secret ? `${secret}|${day}` : day);
+
 /** The main special piece of the day. */
 export function featureFor(day: string, secret = ''): Feature {
   return featuresFor(day, secret)[0];
