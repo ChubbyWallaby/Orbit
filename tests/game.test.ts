@@ -51,6 +51,19 @@ describe('generator', () => {
   }, 240000);
 });
 
+describe('seed secret', () => {
+  test('a secret gives a different, still solvable board that the public generator cannot reproduce', () => {
+    const open = generateLevel(DAY);
+    const secret = generateLevel(DAY, 'test-secret');
+    expect(JSON.stringify(secret.level)).not.toBe(JSON.stringify(open.level));
+    expect(JSON.stringify(generateLevel(DAY, 'test-secret'))).toBe(JSON.stringify(secret));
+    expect(secret.level.day).toBe(DAY);
+    expect(trace(secret.level, secret.solution).result).toBe('hit');
+    // the solution read from the public generator does not solve the real board
+    expect(trace(secret.level, open.solution).result).not.toBe('hit');
+  }, 60000);
+});
+
 describe('board variety', () => {
   test('days vary planets, gravity, stations, moons, mirrors and sides', () => {
     const seen = { giant: new Set<string>(), emitter: new Set<string>(), moon: new Set<string>(), side: new Set<string>(), mirror: new Set<string>() };

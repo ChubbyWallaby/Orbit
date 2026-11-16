@@ -26,6 +26,17 @@ export function cleanName(raw: unknown): string {
   return name;
 }
 
+let warnedNoSecret = false;
+/** Server-only secret mixed into the level seed, so the public generator cannot be run ahead of the server. */
+function seedSecret(): string {
+  const s = process.env.ORBIT_SEED_SECRET ?? '';
+  if (!s && process.env.VERCEL_ENV === 'production' && !warnedNoSecret) {
+    warnedNoSecret = true;
+    console.error('ORBIT_SEED_SECRET is not set: anyone can generate the daily level and its solution from the public source.');
+  }
+  return s;
+}
+
 // Each day's level is generated once, then cached in memory and in the store (generation can take seconds).
 const memo = new Map<string, Promise<Generated>>();
 export function levelFor(day: string): Promise<Generated> {
@@ -36,7 +47,7 @@ export function levelFor(day: string): Promise<Generated> {
       const key = `level:v5:${day}`; // v5: moons orbit
       const hit = await store.getCached(key);
       if (hit) return JSON.parse(hit) as Generated;
-      const fresh = generateLevel(day);
+      const fresh = generateLevel(day, seedSecret());
       await store.setCached(key, JSON.stringify(fresh), 60 * 60 * 24 * 30);
       return fresh;
     })();

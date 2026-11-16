@@ -59,4 +59,6 @@ Inside another site's iframe the player cookie is third-party, so in production 
 
 ## Deploying
 
+Set `ORBIT_SEED_SECRET` to a long random string (for example `openssl rand -hex 32`) in the Vercel project's environment variables, and keep it private. The level generator is in this public repository, so without the secret anyone could run it for any day and read the solution. Changing or removing the secret changes every board that is not already cached, so set it once and leave it.
+
 Deploy to Vercel and add the **Upstash Redis** integration from the Vercel Marketplace. It sets `KV_REST_API_URL` and `KV_REST_API_TOKEN`, which the app picks up automatically. In production the app refuses to start the leaderboard without them, rather than silently losing scores.
