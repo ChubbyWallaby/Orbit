@@ -1,12 +1,13 @@
 'use client';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { constrainMoon, previewLimit, trace, orbitClock, withDestroyed, SATELLITE_RADIUS, type Level, type Placement, type TraceResult, type Vec } from '@/game/engine';
-import { HELPER_ORDER, HELPERS, MAX_SHOTS, msUntilNextPuzzle, scoreFor, shareText, type HelperId } from '@/game/rules';
+import { HELPER_ORDER, HELPERS, MAX_SHOTS, msUntilNextPuzzle, scoreFor, shareText, voyageShareText, type HelperId } from '@/game/rules';
 import type { OrbitScene } from '@/game/scene';
-import type { TodayPayload } from '@/server/game';
+import type { TodayPayload, VoyageInfo, VoyagePayload } from '@/server/game';
 import type { Play, Streak } from '@/server/store';
 import { track } from '@vercel/analytics';
 import Leaderboard from './Leaderboard';
+import MorePuzzles, { starText, type Mode } from './MorePuzzles';
 import { pidHeaders, savePid } from './pid';
 
 type Status = { text: string; kind?: 'good' | 'bad' };
@@ -42,6 +43,36 @@ function loadPlacement(level: Level): Placement {
 }
 
 const START_TEXT = 'Drag the moon into the beam. Turn its mirror. Light the beacon.';
+
+/** The page address says what is being played: today (/), a past day (?day=2026-11-12) or Voyage (?voyage=12). */
+function modeFromSearch(search: string): Mode {
+  const q = new URLSearchParams(search);
+  const day = q.get('day');
+  if (day && /^\d{4}-\d{2}-\d{2}$/.test(day)) return { kind: 'archive', day };
+  if (q.has('voyage')) {
+    const n = Number(q.get('voyage'));
+    return { kind: 'voyage', n: Number.isInteger(n) && n >= 1 ? n : undefined };
+  }
+  return { kind: 'daily' };
+}
+function urlFor(mode: Mode): string {
+  const q = new URLSearchParams(location.search);
+  q.delete('day'); q.delete('voyage');
+  if (mode.kind === 'archive') q.set('day', mode.day);
+  if (mode.kind === 'voyage') q.set('voyage', String(mode.n ?? ''));
+  const qs = q.toString();
+  return location.pathname + (qs ? `?${qs}` : '') + location.hash;
+}
+const modeKey = (m: Mode) => (m.kind === 'archive' ? `day:${m.day}` : m.kind === 'voyage' ? `voyage:${m.n ?? ''}` : 'daily');
+// the address changes on back/forward (popstate) and when the game moves to another puzzle (NAVIGATE)
+const NAVIGATE = 'orbit:navigate';
+function subscribeUrl(cb: () => void) {
+  addEventListener('popstate', cb); addEventListener(NAVIGATE, cb);
+  return () => { removeEventListener('popstate', cb); removeEventListener(NAVIGATE, cb); };
+}
+const freshPlay = (): Play => ({ shots: [], helpers: [], status: 'playing', score: 0, destroyed: [] });
+type VoyageState = { n: number; unlocked: number; stars: Record<number, number>; info: VoyageInfo };
+const dateText = (day: string) => new Date(day + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
 
 /** A short description of today's board, e.g. "Ice giant · strong gravity · small mirror". */
 function conditions(level: Level): string | null {
@@ -81,9 +112,9 @@ function todaysPieces(level: Level): { label: string; intro: string }[] {
   return out;
 }
 
-function pieceIntro(level: Level): string | null {
+function pieceIntro(level: Level, lead = 'Today:'): string | null {
   const pieces = todaysPieces(level);
-  return pieces.length ? `Today: ${pieces.map((p) => p.intro).join(' ')}` : null;
+  return pieces.length ? `${lead} ${pieces.map((p) => p.intro).join(' ')}` : null;
 }
 
 /** Why a shot did not reach the beacon. */
@@ -125,12 +156,25 @@ export default function Game() {
   const [heldT, setHeldT] = useState<number | null>(null);
   const [status, setStatus] = useState<Status>({ text: START_TEXT });
   const pendingFire = useRef(false);
+  // what is being played comes from the address (null while the page is rendered on the server)
+  const search = useSyncExternalStore(subscribeUrl, () => location.search, () => null);
+  const mode = useMemo(() => (search === null ? null : modeFromSearch(search)), [search]);
+  const [voy, setVoy] = useState<VoyageState | null>(null);
+  const [moreOpen, setMoreOpen] = useState<'voyage' | 'archive' | null>(null);
+  // the mode the puzzle on screen was loaded for; anything else means a new one is loading
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  const loadedRef = useRef<string | null>(null);
+  const loading = !mode || loadedFor !== modeKey(mode);
 
+  const isVoyage = mode?.kind === 'voyage';
+  const archiveDay = mode?.kind === 'archive' ? mode.day : undefined;
+  const ranked = mode?.kind === 'daily';
   const level = data?.level ?? null;
   const finished = play.status !== 'playing';
   const canAim = !finished || practice;
   const helpers = play.helpers;
   const energized = helpers.includes('energized');
+  const scanner = helpers.includes('scanner') || !!(isVoyage && voy?.info.scanner);
   const destroyed = useMemo(() => [...play.destroyed, ...practiceDestroyed], [play.destroyed, practiceDestroyed]);
 
   // create the 3D scene once
@@ -150,23 +194,65 @@ export default function Game() {
     return () => { disposed = true; sceneRef.current?.dispose(); sceneRef.current = null; };
   }, []);
 
-  // load today's puzzle
-  useEffect(() => {
-    api<TodayPayload>('/api/today').then((d) => {
-      setData(d); setPlay(d.me.play); setName(d.me.name); setStreak(d.me.streak);
-      const intro = pieceIntro(d.level);
-      if (intro) setStatus({ text: intro });
-      const { t, ...p } = loadPlacement(d.level);
-      if (!d.me.play.helpers.includes('satellite')) p.satellite = null;
-      // keep the moons where the last shot of a finished day found them
-      if (d.me.play.status !== 'playing') setHeldT(t ?? 0);
-      setPlacement(p);
-      if (!d.me.name) setNameOpen(true);
-      if (d.me.play.status !== 'playing') {
-        setStatus(d.me.play.status === 'won' ? { text: `You lit today’s beacon for ${d.me.play.score} points.`, kind: 'good' } : { text: 'The beacon stayed dark today. A new puzzle unlocks at midnight UTC.', kind: 'bad' });
-      }
-    }).catch((e) => setLoadError(e.message));
+  const go = useCallback((m: Mode) => {
+    setMoreOpen(null); setResultOpen(false);
+    history.pushState(null, '', urlFor(m));
+    dispatchEvent(new Event(NAVIGATE));
   }, []);
+
+  // load the puzzle for the current mode
+  useEffect(() => {
+    if (!mode) return;
+    const key = modeKey(mode);
+    if (loadedRef.current === key) return; // already on screen (e.g. the address was just tidied up)
+    let live = true;
+    const show = (lvl: Level, p0: Play, intro: string | null, shownKey = key) => {
+      // a new puzzle: nothing carries over from the last one
+      setPractice(false); setPracticeDestroyed([]); setResultOpen(false); setConfirming(null); setLoadError(null);
+      beamFor.current = null; setHeldT(null);
+      sceneRef.current?.clearBeam();
+      loadedRef.current = shownKey; setLoadedFor(shownKey);
+      setData((d) => ({ level: lvl, me: { name: d?.me.name ?? null, play: p0, streak: d?.me.streak ?? { current: 0, best: 0 } }, archive: mode.kind === 'archive' }));
+      setPlay(p0);
+      setStatus({ text: intro ?? START_TEXT });
+      const { t, ...p } = loadPlacement(lvl);
+      if (!p0.helpers.includes('satellite')) p.satellite = null;
+      // keep the moons where the last shot of a finished day found them
+      if (p0.status !== 'playing') setHeldT(t ?? 0);
+      setPlacement(p);
+    };
+    if (mode.kind === 'voyage') {
+      const load = (n?: number): Promise<void> => api<VoyagePayload>(`/api/voyage${n ? `?n=${n}` : ''}`).then((v) => {
+        if (!live) return;
+        setVoy({ n: v.n, unlocked: v.unlocked, stars: v.stars, info: v.info });
+        const shown: Mode = { kind: 'voyage', n: v.n };
+        show(v.level, { ...freshPlay(), shots: v.shots }, `Level ${v.n} · ${v.info.chapter}. ${pieceIntro(v.level, 'New:') ?? START_TEXT}`, modeKey(shown));
+        // the address names the level on screen, so a reload or a shared link opens the same one
+        if (v.n !== mode.n) { history.replaceState(null, '', urlFor(shown)); dispatchEvent(new Event(NAVIGATE)); }
+      }, (e) => {
+        // a level that is not open yet (e.g. an old link): go to the furthest one instead
+        if (n && (e as { status?: number }).status === 403) return load();
+        throw e;
+      });
+      load(mode.n).catch((e) => live && setLoadError(e.message));
+    } else {
+      const day = mode.kind === 'archive' ? mode.day : undefined;
+      api<TodayPayload>(`/api/today${day ? `?day=${day}` : ''}`).then((d) => {
+        if (!live) return;
+        setVoy(null);
+        setName(d.me.name); setStreak(d.me.streak);
+        show(d.level, d.me.play, pieceIntro(d.level, d.archive ? 'This day:' : 'Today:'));
+        setData(d);
+        if (!d.me.name && !d.archive) setNameOpen(true);
+        if (d.me.play.status !== 'playing') {
+          setStatus(d.archive
+            ? (d.me.play.status === 'won' ? { text: `You lit this beacon for ${d.me.play.score} points.`, kind: 'good' } : { text: 'The beacon stayed dark on this day.', kind: 'bad' })
+            : d.me.play.status === 'won' ? { text: `You lit today’s beacon for ${d.me.play.score} points.`, kind: 'good' } : { text: 'The beacon stayed dark today. A new puzzle unlocks at midnight UTC.', kind: 'bad' });
+        }
+      }).catch((e) => live && setLoadError(e.message));
+    }
+    return () => { live = false; };
+  }, [mode]);
 
   // hand the level to the scene once both exist
   const [sceneReady, setSceneReady] = useState(false);
@@ -214,16 +300,16 @@ export default function Game() {
       } else {
         if (beamFor.current !== placement) { s.clearBeam(); beamFor.current = null; }
         // while the last shot's beam is on screen it shows the path; otherwise show the aiming line
-        s.setPreview(beamFor.current ? null : preview, previewLimit(preview, helpers.includes('scanner')));
+        s.setPreview(beamFor.current ? null : preview, previewLimit(preview, scanner));
       }
     }
-  }, [sceneReady, level, placement, preview, helpers, canAim, busy, play.status]);
+  }, [sceneReady, level, placement, preview, scanner, canAim, busy, play.status]);
 
   useEffect(() => { sceneRef.current?.setDestroyed(destroyed); }, [sceneReady, level, destroyed]);
 
   const fire = useCallback(async () => {
-    if (!level || !placement || busy || finished) return;
-    if (!name) { pendingFire.current = true; setNameOpen(true); return; }
+    if (!level || !placement || busy || finished || loading) return;
+    if (ranked && !name) { pendingFire.current = true; setNameOpen(true); return; }
     setBusy(true);
     setStatus({ text: 'Beam away…' });
     const s = sceneRef.current;
@@ -233,7 +319,8 @@ export default function Game() {
     const shot: Placement = level.orbitPeriod ? { ...placement, t } : placement;
     setHeldT(t); s?.holdOrbits(t);
     try {
-      const res = await api<{ result: TraceResult['result']; hitName: string | null; destroyed: number[]; score: number; status: Play['status']; play: Play; streak: Streak }>('/api/shot', { placement: shot });
+      const res = await api<{ result: TraceResult['result']; hitName: string | null; destroyed: number[]; score: number; status: Play['status']; play: Play; streak: Streak; pid: string }>('/api/shot', { placement: shot, ...(archiveDay ? { day: archiveDay } : {}) });
+      savePid(res.pid);
       if (s) await s.fire(trace(withDestroyed(level, destroyed), shot), energized);
       beamFor.current = placement;
       setPlay(res.play);
@@ -245,19 +332,62 @@ export default function Game() {
       else if (res.destroyed.length) setStatus({ text: `Asteroid destroyed! The way is clearer for your next shot.${tail}`, kind: 'bad' });
       else setStatus({ text: `${missText(level, res.result, res.hitName)}${tail}`, kind: 'bad' });
       if (res.status !== 'playing') {
-        track('finished', { result: res.status, shots: res.play.shots.length, helpers: res.play.helpers.length, score: res.score });
-        if (res.status === 'lost') setStatus({ text: 'Out of shots. The beacon stays dark today.', kind: 'bad' });
+        track(archiveDay ? 'archive_finished' : 'finished', { result: res.status, shots: res.play.shots.length, helpers: res.play.helpers.length, score: res.score });
+        if (res.status === 'lost') setStatus({ text: archiveDay ? 'Out of shots. The beacon stays dark on this day.' : 'Out of shots. The beacon stays dark today.', kind: 'bad' });
         setTimeout(() => setResultOpen(true), 900);
       }
     } catch (e) {
       const err = e as Error & { status?: number };
-      if (err.status === 401) { setName(null); pendingFire.current = true; setNameOpen(true); }
+      if (err.status === 401 && ranked) { setName(null); pendingFire.current = true; setNameOpen(true); }
       setHeldT(null);
       setStatus({ text: err.message, kind: 'bad' });
     } finally {
       setBusy(false);
     }
-  }, [level, placement, busy, finished, name, energized, destroyed]);
+  }, [level, placement, busy, finished, loading, name, energized, destroyed, ranked, archiveDay]);
+
+  // Voyage shots are checked on the server, which keeps the stars and opens the next level
+  const voyageFire = async () => {
+    if (!level || !placement || !voy || busy || finished || loading) return;
+    setBusy(true);
+    setStatus({ text: 'Beam away…' });
+    const s = sceneRef.current;
+    s?.setPreview(null, 0); s?.clearBeam();
+    const t = s?.orbitTime() ?? 0;
+    const shot: Placement = level.orbitPeriod ? { ...placement, t } : placement;
+    setHeldT(t); s?.holdOrbits(t);
+    try {
+      const res = await api<{ result: TraceResult['result']; hitName: string | null; shots: string[]; status: Play['status']; stars: number; best: number; unlocked: number; starsByLevel: Record<number, number>; pid: string }>('/api/voyage', { n: voy.n, placement: shot });
+      savePid(res.pid);
+      if (s) await s.fire(trace(level, shot), false);
+      beamFor.current = placement;
+      setPlay({ ...freshPlay(), shots: res.shots, status: res.status, score: res.stars });
+      setVoy({ ...voy, unlocked: res.unlocked, stars: res.starsByLevel });
+      const left = MAX_SHOTS - res.shots.length;
+      if (res.status === 'won') {
+        track('voyage_cleared', { level: voy.n, stars: res.stars });
+        setStatus({ text: `Level ${voy.n} cleared! ${starText(res.stars)}`, kind: 'good' });
+        setTimeout(() => setResultOpen(true), 900);
+      } else if (res.status === 'lost') {
+        track('voyage_failed', { level: voy.n });
+        setStatus({ text: `${missText(level, res.result, res.hitName)} Out of shots. Try again: the level stays the same.`, kind: 'bad' });
+      } else setStatus({ text: `${missText(level, res.result, res.hitName)} ${left} ${left === 1 ? 'shot' : 'shots'} left.`, kind: 'bad' });
+    } catch (e) {
+      setHeldT(null);
+      setStatus({ text: (e as Error).message, kind: 'bad' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** A new attempt at the same Voyage level (after a win, to earn more stars, or after running out of shots). */
+  const retryVoyage = () => {
+    setResultOpen(false);
+    setPlay(freshPlay());
+    beamFor.current = null; setHeldT(null);
+    sceneRef.current?.clearBeam();
+    setStatus({ text: voy ? `Level ${voy.n}: three fresh shots.` : START_TEXT });
+  };
 
   // practice shots are traced locally with the same physics and never sent to the server
   const practiceFire = async () => {
@@ -292,12 +422,13 @@ export default function Game() {
   };
 
   const applyHelper = async (id: HelperId) => {
-    if (!level || !placement || finished || helpers.includes(id)) return;
-    if (!name) { setNameOpen(true); return; }
+    if (!level || !placement || finished || helpers.includes(id) || isVoyage) return;
+    if (ranked && !name) { setNameOpen(true); return; }
     if (confirming !== id) { setConfirming(id); return; }
     setConfirming(null);
     try {
-      const r = await api<{ helpers: HelperId[] }>('/api/helper', { helper: id });
+      const r = await api<{ helpers: HelperId[]; pid: string }>('/api/helper', { helper: id, ...(archiveDay ? { day: archiveDay } : {}) });
+      savePid(r.pid);
       setPlay((p) => ({ ...p, helpers: r.helpers }));
       track('helper_used', { helper: id });
       setHelpersOpen(false);
@@ -323,20 +454,27 @@ export default function Game() {
           <h1 className="wordmark">ORB<span>I</span>T</h1>
           {level && todaysPieces(level).length > 0 && <div className="meta piece">{todaysPieces(level).map((p) => p.label).join(' + ')}</div>}
           {level && conditions(level) && <div className="meta wrap">{conditions(level)}</div>}
-          <div className="meta">{level ? `Daily #${level.number} · ${new Date(level.day + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })}` : 'Loading today’s puzzle…'}</div>
+          <div className={`meta ${isVoyage || archiveDay ? 'mode' : ''}`}>
+            {!level || loading ? 'Loading the puzzle…'
+              : isVoyage && voy ? `Voyage · Level ${voy.n} · ${voy.info.chapter}${voy.stars[voy.n] ? ` · best ${starText(voy.stars[voy.n])}` : ''}`
+              : archiveDay ? `Archive · Daily #${level.number} · ${dateText(level.day)}`
+              : `Daily #${level.number} · ${dateText(level.day)}`}
+          </div>
         </div>
         <div className="right">
           <div className="pips" aria-label={`${MAX_SHOTS - play.shots.length} shots left`}>
             {Array.from({ length: MAX_SHOTS }, (_, i) => <span key={i} className={`pip ${play.shots[i] === 'hit' ? 'won' : play.shots[i] ? 'used' : ''}`} />)}
           </div>
-          <div className="row" style={{ gap: 6 }}>
-            {streak.current > 0 && <span className="chip streak" title={`Best streak: ${streak.best}`}>Streak {streak.current}</span>}
-            <button className="chip" onClick={() => setBoardOpen(true)}>Leaderboard</button>
+          <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+            {ranked && streak.current > 0 && <span className="chip streak" title={`Best streak: ${streak.best}`}>Streak {streak.current}</span>}
+            {mode && !ranked && <button className="chip" onClick={() => go({ kind: 'daily' })}>Today</button>}
+            <button className="chip more-chip" onClick={() => setMoreOpen(isVoyage ? 'voyage' : archiveDay ? 'archive' : 'voyage')}>More puzzles</button>
+            {!isVoyage && <button className="chip" onClick={() => setBoardOpen(true)}>Leaderboard</button>}
           </div>
         </div>
       </header>
 
-      {level && (
+      {level && !isVoyage && (
         <aside className={`hud helpers ${helpersOpen ? '' : 'closed'}`} aria-label="Helpers">
           <button className="chip helpers-toggle" onClick={() => setHelpersOpen((o) => !o)} aria-expanded={helpersOpen}>
             Helpers {helpers.length ? `(${helpers.length})` : ''}
@@ -375,24 +513,47 @@ export default function Game() {
               </div>
             )}
             <div className="row">
-              {finished && practice ? (
+              {isVoyage && voy ? (
+                play.status === 'won' ? (
+                  <>
+                    <div className="potential">Level {voy.n} cleared · <b>{starText(play.score)}</b></div>
+                    <button className="btn" disabled={busy} onClick={retryVoyage}>Replay</button>
+                    <button className="btn primary" disabled={busy} onClick={() => go({ kind: 'voyage', n: voy.n + 1 })}>Next level</button>
+                  </>
+                ) : play.status === 'lost' ? (
+                  <>
+                    <div className="potential">Out of shots on level {voy.n}.</div>
+                    <button className="btn" onClick={() => setMoreOpen('voyage')}>Levels</button>
+                    <button className="btn primary" onClick={retryVoyage}>Try again</button>
+                  </>
+                ) : (
+                  <>
+                    <div className="potential">A hit now earns <b>{starText(Math.max(1, MAX_SHOTS - play.shots.length))}</b>{voy.info.scanner ? ' · long aiming line on this level' : ''}</div>
+                    <button className="btn" disabled={busy} onClick={resetMoon}>Reset moon</button>
+                    <button className="btn fire" disabled={busy || loading} onClick={voyageFire}>Fire</button>
+                  </>
+                )
+              ) : finished && practice ? (
                 <>
-                  <div className="potential"><b>Practice</b> · shots don’t count. Today: {play.status === 'won' ? `${play.score} pts` : 'no points'}</div>
+                  <div className="potential"><b>Practice</b> · shots don’t count. {archiveDay ? 'This day' : 'Today'}: {play.status === 'won' ? `${play.score} pts` : 'no points'}</div>
                   <button className="btn" disabled={busy} onClick={resetMoon}>Reset moon</button>
                   <button className="btn" disabled={busy} onClick={() => setResultOpen(true)}>Your result</button>
                   <button className="btn fire" disabled={busy} onClick={practiceFire}>Practice shot</button>
                 </>
               ) : finished ? (
                 <>
-                  <div className="potential">{play.status === 'won' ? <>Today: <b>{play.score} pts</b></> : 'No points today.'} Next puzzle in <Countdown /></div>
+                  {archiveDay
+                    ? <div className="potential">{play.status === 'won' ? <>This day: <b>{play.score} pts</b></> : 'No points on this day.'} Archive games don’t count for the leaderboard.</div>
+                    : <div className="potential">{play.status === 'won' ? <>Today: <b>{play.score} pts</b></> : 'No points today.'} Next puzzle in <Countdown /></div>}
                   <button className="btn" onClick={() => setResultOpen(true)}>Your result</button>
-                  <button className="btn primary" onClick={startPractice}>Keep practising</button>
+                  <button className="btn" onClick={startPractice}>Practise</button>
+                  <button className="btn primary" onClick={() => setMoreOpen(archiveDay ? 'archive' : 'voyage')}>More puzzles</button>
                 </>
               ) : (
                 <>
-                  <div className="potential">A hit now scores <b>{nextScore} pts</b>{helpers.length ? ` (helpers −${helpers.reduce((s, h) => s + HELPERS[h].cost, 0)})` : ''}</div>
+                  <div className="potential">A hit now scores <b>{nextScore} pts</b>{helpers.length ? ` (helpers −${helpers.reduce((s, h) => s + HELPERS[h].cost, 0)})` : ''}{archiveDay ? ' · archive, not ranked' : ''}</div>
                   <button className="btn" disabled={busy} onClick={resetMoon}>Reset moon</button>
-                  <button className="btn fire" disabled={busy} onClick={fire}>Fire</button>
+                  <button className="btn fire" disabled={busy || loading} onClick={fire}>Fire</button>
                 </>
               )}
             </div>
@@ -407,8 +568,12 @@ export default function Game() {
           onSkip={() => { setNameOpen(false); pendingFire.current = false; }}
         />
       )}
-      {resultOpen && level && <ResultCard level={level} play={play} streak={streak} practice={practice} onPractice={startPractice} onClose={() => setResultOpen(false)} onBoard={() => { setResultOpen(false); setBoardOpen(true); }} />}
-      {boardOpen && <Leaderboard puzzleNumber={level?.number ?? 1} onClose={() => setBoardOpen(false)} />}
+      {resultOpen && level && isVoyage && voy && play.status === 'won' && (
+        <VoyageResult n={voy.n} stars={play.score} onNext={() => go({ kind: 'voyage', n: voy.n + 1 })} onReplay={retryVoyage} onLevels={() => { setResultOpen(false); setMoreOpen('voyage'); }} onClose={() => setResultOpen(false)} />
+      )}
+      {resultOpen && level && !isVoyage && <ResultCard level={level} play={play} streak={streak} practice={practice} archive={!!archiveDay} onPractice={startPractice} onMore={() => { setResultOpen(false); setMoreOpen(archiveDay ? 'archive' : 'voyage'); }} onClose={() => setResultOpen(false)} onBoard={() => { setResultOpen(false); setBoardOpen(true); }} />}
+      {boardOpen && <Leaderboard puzzleNumber={ranked ? level?.number ?? 1 : undefined} onClose={() => setBoardOpen(false)} />}
+      {moreOpen && mode && <MorePuzzles initial={moreOpen} mode={mode} onGo={go} onClose={() => setMoreOpen(null)} />}
     </>
   );
 }
@@ -433,6 +598,7 @@ function NameDialog({ initial, onDone, onSkip }: { initial: string; onDone: (nam
           <li>Light bends near planets. The dashed line only shows the start of the beam.</li>
           <li>You get <b>3 shots</b>: a hit scores 1,000, 700 or 400. Helpers cost points.</li>
           <li>Everyone plays the same puzzle. Points add up on the all-time leaderboard.</li>
+          <li>Want more? <b>Voyage</b> is an endless run of levels, and <b>past days</b> stay playable.</li>
         </ol>
         <div className="field">
           <label htmlFor="pilot">Pilot name for the leaderboard</label>
@@ -456,18 +622,19 @@ function Countdown() {
   return <b>{pad(Math.floor(s / 3600))}:{pad(Math.floor((s % 3600) / 60))}:{pad(s % 60)}</b>;
 }
 
-function ResultCard({ level, play, streak, practice, onPractice, onClose, onBoard }: { level: Level; play: Play; streak: Streak; practice: boolean; onPractice: () => void; onClose: () => void; onBoard: () => void }) {
-  const text = shareText({ number: level.number, shots: play.shots, score: play.score, helpers: play.helpers, streak: streak.current });
+function ResultCard({ level, play, streak, practice, archive, onPractice, onMore, onClose, onBoard }: { level: Level; play: Play; streak: Streak; practice: boolean; archive: boolean; onPractice: () => void; onMore: () => void; onClose: () => void; onBoard: () => void }) {
+  const text = shareText({ number: level.number, shots: play.shots, score: play.score, helpers: play.helpers, streak: streak.current, archive });
   const [copied, setCopied] = useState('Copy result');
   const shareRef = useRef<HTMLDivElement>(null);
   const [rank, setRank] = useState<{ day: number | null; all: number | null; players: number } | null>(null);
   useEffect(() => {
+    if (archive) return; // archive games have no rank
     Promise.all([api<{ me: { rank: number } | null; players: number }>('/api/leaderboard?scope=day'), api<{ me: { rank: number } | null }>('/api/leaderboard?scope=all')])
       .then(([d, a]) => setRank({ day: d.me?.rank ?? null, all: a.me?.rank ?? null, players: d.players }))
       .catch(() => setRank(null));
-  }, []);
+  }, [archive]);
   const copy = () => {
-    track('shared', { result: play.status });
+    track('shared', { result: play.status, archive });
     navigator.clipboard.writeText(text).then(() => { setCopied('Copied'); setTimeout(() => setCopied('Copy result'), 1600); }, () => {
       const r = document.createRange(); r.selectNodeContents(shareRef.current!); const s = getSelection()!; s.removeAllRanges(); s.addRange(r);
       setCopied('Press Ctrl+C');
@@ -478,20 +645,48 @@ function ResultCard({ level, play, streak, practice, onPractice, onClose, onBoar
     <div className="overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className={`card ${won ? 'win' : ''}`} role="dialog" aria-labelledby="resTitle">
         <h2 id="resTitle">{won ? 'Beacon lit' : 'Beacon dark'}</h2>
-        {won ? <div className="big">{play.score}<small>pts</small></div> : <p>All three shots missed, so your streak resets. The game still counts on the leaderboard, and a new puzzle unlocks at midnight UTC.</p>}
+        {won ? <div className="big">{play.score}<small>pts</small></div> : <p>{archive
+          ? 'All three shots missed. Archive games don’t count for the leaderboard or your streak.'
+          : 'All three shots missed, so your streak resets. The game still counts on the leaderboard, and a new puzzle unlocks at midnight UTC.'}</p>}
         <div className="facts">
           <span><b>{play.shots.length}/{MAX_SHOTS}</b>shots</span>
-          <span><b>{streak.current}</b>day streak</span>
-          <span><b>{rank?.day ? `#${rank.day}` : '–'}</b>today{rank ? ` of ${rank.players}` : ''}</span>
-          <span><b>{rank?.all ? `#${rank.all}` : '–'}</b>all time</span>
+          {archive ? <span><b>#{level.number}</b>{dateText(level.day)}</span> : <>
+            <span><b>{streak.current}</b>day streak</span>
+            <span><b>{rank?.day ? `#${rank.day}` : '–'}</b>today{rank ? ` of ${rank.players}` : ''}</span>
+            <span><b>{rank?.all ? `#${rank.all}` : '–'}</b>all time</span>
+          </>}
         </div>
         <div className="share" ref={shareRef}>{text}</div>
         <div className="row">
           <button className="btn primary" onClick={copy}>{copied}</button>
-          <button className="btn" onClick={onBoard}>Leaderboard</button>
+          {archive ? <button className="btn" onClick={onMore}>Past days</button> : <button className="btn" onClick={onBoard}>Leaderboard</button>}
         </div>
+        {!archive && <button className="btn more-cta" onClick={onMore}>Want more? Play Voyage or past days</button>}
         {!practice && <button className="btn" onClick={onPractice}>Keep practising (doesn’t count)</button>}
-        <p>Next puzzle in <Countdown /></p>
+        {!archive && <p>Next puzzle in <Countdown /></p>}
+      </div>
+    </div>
+  );
+}
+
+function VoyageResult({ n, stars, onNext, onReplay, onLevels, onClose }: { n: number; stars: number; onNext: () => void; onReplay: () => void; onLevels: () => void; onClose: () => void }) {
+  const [copied, setCopied] = useState('Copy result');
+  const copy = () => {
+    track('shared', { result: 'voyage' });
+    navigator.clipboard.writeText(voyageShareText(n, stars)).then(() => { setCopied('Copied'); setTimeout(() => setCopied('Copy result'), 1600); }, () => setCopied('Could not copy'));
+  };
+  return (
+    <div className="overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="card win" role="dialog" aria-labelledby="voyTitle">
+        <h2 id="voyTitle">Level {n} cleared</h2>
+        <div className="big stars" aria-label={`${stars} of 3 stars`}>{starText(stars)}</div>
+        <p>{stars === 3 ? 'First shot. Perfect.' : `Clear it on the ${stars === 2 ? 'first shot' : 'first or second shot'} for more stars, or keep going.`}</p>
+        <button className="btn primary" autoFocus onClick={onNext}>Next level</button>
+        <div className="row">
+          <button className="btn" onClick={onReplay}>Replay</button>
+          <button className="btn" onClick={onLevels}>All levels</button>
+          <button className="btn" onClick={copy}>{copied}</button>
+        </div>
       </div>
     </div>
   );

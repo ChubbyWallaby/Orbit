@@ -1,10 +1,12 @@
-import { beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { bodiesAt, constrainMoon, orbitClock, previewLimit, trace, withDestroyed, type Level } from '@/game/engine';
 import { generateLevel, featuresFor, FALLBACK_LEVEL, ORBIT_PERIOD } from '@/game/generate';
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
 import { MemoryStore, setStoreForTests, nextStreak, liveStreak, rankEntries, windowStart } from '@/server/store';
 import { isJsonRequest, pickPid, pidCookieOptions } from '@/server/pid';
-import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, GameError } from '@/server/game';
+import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, archive, resolveDay, voyage, voyageShot, voyageLevelFor, GameError } from '@/server/game';
+import { voyageSpec, voyageStars, PREBUILT } from '@/game/voyage';
+import prebuilt from '@/game/voyage-levels.json';
 
 const DAY = '2026-11-10';
 
@@ -324,9 +326,14 @@ describe('streaks', () => {
   });
 });
 
+/** Makes `day` today's puzzle, the way ORBIT_DAY does in development. */
+const setToday = (day: string) => { process.env.ORBIT_DAY = day; };
+afterEach(() => { delete process.env.ORBIT_DAY; });
+
 describe('server game', () => {
   let store: MemoryStore;
   beforeEach(async () => {
+    setToday(DAY);
     store = new MemoryStore(); setStoreForTests(store);
     const g = await levelFor(DAY);
     sol = () => g.solution;
@@ -393,6 +400,7 @@ describe('server game', () => {
   test('the energized laser destroys an asteroid so the next shot gets through', async () => {
     // a custom level where an asteroid sits right in the laser's path to the beacon
     const day = '2099-01-01';
+    setToday(day);
     const level: Level = { ...FALLBACK_LEVEL(day), emitter: { x: -20, z: 0, dir: 0 }, target: { x: 20, z: 0, r: 1.5 }, bodies: [], splitters: [], wormholes: [], rocks: [{ x: 0, z: 0, r: 1 }] };
     const placement = { moon: { x: -25, z: 20 }, angle: 0 };
     await store.setCached(`level:v5:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
@@ -407,6 +415,7 @@ describe('server game', () => {
 
   test('a destroyed asteroid lets a later shot win', async () => {
     const day = '2099-01-02';
+    setToday(day);
     const level: Level = { ...FALLBACK_LEVEL(day), emitter: { x: -20, z: 0, dir: 0 }, target: { x: 20, z: 0, r: 1.5 }, bodies: [], splitters: [], wormholes: [], rocks: [{ x: 0, z: 0, r: 1 }] };
     const placement = { moon: { x: -25, z: 20 }, angle: 0 };
     await store.setCached(`level:v5:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }));
@@ -421,6 +430,7 @@ describe('server game', () => {
     await setName('a', 'Ana'); await setName('b', 'Bo'); await setName('c', 'Cy');
     await shoot('a', sol(), DAY); // 1000
     await shoot('b', miss(), DAY); await shoot('b', sol(), DAY); // 700
+    setToday(day2);
     await shoot('c', sol2, day2); // 1000 on day 2
     await shoot('b', sol2, day2); // b total 1700
     const all = await leaderboard('c', 'all', day2);
@@ -434,6 +444,110 @@ describe('server game', () => {
     const d1 = await leaderboard(null, 'day', DAY);
     expect(d1.top.map((e) => e.name)).toEqual(['Ana', 'Bo']);
     expect(d1.me).toBeNull();
+  });
+});
+
+describe('archive', () => {
+  let store: MemoryStore;
+  beforeEach(() => { store = new MemoryStore(); setStoreForTests(store); setToday('2026-11-12'); });
+
+  test('which days can be played', () => {
+    expect(resolveDay(undefined)).toEqual({ day: '2026-11-12', ranked: true });
+    expect(resolveDay('2026-11-12')).toEqual({ day: '2026-11-12', ranked: true });
+    expect(resolveDay('2026-11-10')).toEqual({ day: '2026-11-10', ranked: false });
+    expect(() => resolveDay('2026-11-13')).toThrow('not out yet');
+    expect(() => resolveDay('2026-11-09')).toThrow('no puzzles before');
+    expect(() => resolveDay('../etc')).toThrow('Unknown puzzle');
+  });
+
+  test('a past day can be played once without a name, and does not touch the leaderboards or the streak', async () => {
+    const g = await levelFor(DAY);
+    const miss = { moon: g.level.moon.start, angle: g.level.moon.startAngle };
+    expect((await today('x', DAY)).archive).toBe(true);
+    expect((await shoot('x', miss, DAY)).status).toBe('playing'); // no pilot name needed
+    await applyHelper('x', 'scanner', DAY);
+    const r = await shoot('x', g.solution, DAY);
+    expect(r).toMatchObject({ result: 'hit', status: 'won', score: 700 - 150 });
+    await expect(shoot('x', g.solution, DAY)).rejects.toThrow('already finished');
+    expect((await today('x', DAY)).me.play).toMatchObject({ status: 'won', score: 550 });
+    expect(store.allBoard.size).toBe(0);
+    expect(store.dayBoards.size).toBe(0);
+    expect((await today('x')).me.streak).toEqual({ current: 0, best: 0 });
+    // the archive lists past days, newest first, with this player's results
+    const { days } = await archive('x');
+    expect(days.map((d) => [d.day, d.number, d.status])).toEqual([['2026-11-11', 2, 'open'], ['2026-11-10', 1, 'won']]);
+    expect(days[1]).toMatchObject({ score: 550 });
+    expect((await archive(null)).days.every((d) => d.status === 'open')).toBe(true);
+  });
+
+  test("today's puzzle still needs a name and still counts", async () => {
+    const g = await levelFor('2026-11-12');
+    await expect(shoot('y', g.solution)).rejects.toThrow('Pick a pilot name');
+    await setName('y', 'Yan');
+    expect((await shoot('y', g.solution)).score).toBe(1000);
+    expect(store.allBoard.get('y')).toBe(1000);
+    expect((await archive('y')).days.some((d) => d.day === '2026-11-12')).toBe(false); // today is not in the archive
+  });
+});
+
+describe('voyage', () => {
+  beforeEach(() => { setStoreForTests(new MemoryStore()); });
+
+  test('prebuilt levels are numbered, solvable with a mirror bounce, and have their chapter piece', () => {
+    const levels = prebuilt as unknown as import('@/game/generate').Generated[];
+    expect(levels.length).toBe(PREBUILT);
+    const has: Record<string, (l: Level) => boolean> = {
+      plain: () => true,
+      blackhole: (l) => l.bodies.some((b) => b.kind === 'blackhole'),
+      repulsor: (l) => l.bodies.some((b) => b.kind === 'repulsor'),
+      mirrors: (l) => !!l.mirrors?.length,
+      wormhole: (l) => l.wormholes.length > 0,
+      splitter: (l) => l.splitters.length > 0,
+      relay: (l) => !!l.relays?.length,
+      twin: (l) => !!l.extraEmitters?.length,
+    };
+    levels.forEach((g, i) => {
+      const n = i + 1;
+      expect(g.level).toMatchObject({ voyage: n, number: n, day: `voyage-${n}` });
+      const sol = trace(g.level, g.solution);
+      expect(sol.result, `level ${n}`).toBe('hit');
+      expect(sol.rays.find((r) => r.result === 'hit')!.pts.some((p) => p.bounce && !p.fixed), `level ${n}`).toBe(true);
+      expect(trace(g.level, { moon: g.level.moon.start, angle: g.level.moon.startAngle }).result, `level ${n}`).not.toBe('hit');
+      if (n <= 27) for (const f of voyageSpec(n).features) expect(has[f](g.level), `level ${n} ${f}`).toBe(true);
+      // the first levels keep their moons still
+      if (n < 13) expect(g.level.orbitPeriod, `level ${n}`).toBeUndefined();
+    });
+  });
+
+  test('the curve: one new piece per chapter, then two pieces and smaller mirrors in deep space', () => {
+    expect(voyageSpec(1)).toMatchObject({ chapter: 'First light', features: ['plain'], scanner: true });
+    expect(voyageSpec(7).features).toEqual(['blackhole']);
+    expect(voyageSpec(27).features).toEqual(['twin']);
+    expect(voyageSpec(28).chapter).toBe('Deep space');
+    expect(voyageSpec(30).features).toHaveLength(1);
+    for (let n = 70; n < 80; n++) expect(voyageSpec(n).features).toHaveLength(2);
+    expect(voyageStars(1)).toBe(3);
+    expect(voyageStars(3)).toBe(1);
+  });
+
+  test('progress: misses end an attempt, a hit earns stars and opens the next level', async () => {
+    const one = await voyageLevelFor(1);
+    const miss = { moon: one.level.moon.start, angle: one.level.moon.startAngle };
+    expect((await voyage(null)).n).toBe(1);
+    await expect(voyage('v', 2)).rejects.toThrow('Clear level 1 first');
+    await expect(voyageShot('v', 2, one.solution)).rejects.toThrow('Clear level 1 first');
+    await voyageShot('v', 1, miss);
+    expect((await voyage('v', 1)).shots).toHaveLength(1); // an attempt in progress is kept
+    await voyageShot('v', 1, miss);
+    expect(await voyageShot('v', 1, miss)).toMatchObject({ status: 'lost', stars: 0, unlocked: 1 });
+    expect((await voyage('v', 1)).shots).toEqual([]); // the next attempt starts fresh
+    expect(await voyageShot('v', 1, one.solution)).toMatchObject({ result: 'hit', status: 'won', stars: 3, unlocked: 2 });
+    expect((await voyage('v')).n).toBe(2); // continues at the furthest level
+    // replaying for fewer stars keeps the best
+    await voyageShot('v', 1, miss);
+    await voyageShot('v', 1, one.solution);
+    expect((await voyage('v', 1)).stars).toEqual({ 1: 3 });
+    await expect(voyageShot(null, 1, one.solution)).rejects.toThrow('Could not tell who you are');
   });
 });
 

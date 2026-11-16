@@ -35,7 +35,7 @@ const round = (n: number, d = 2) => Math.round(n * 10 ** d) / 10 ** d;
 
 export type Feature = 'plain' | 'blackhole' | 'splitter' | 'wormhole' | 'mirrors' | 'relay' | 'repulsor' | 'twin';
 
-const NEW_POOL: Feature[] = ['blackhole', 'splitter', 'wormhole', 'mirrors', 'relay', 'repulsor', 'twin'];
+export const NEW_POOL: Feature[] = ['blackhole', 'splitter', 'wormhole', 'mirrors', 'relay', 'repulsor', 'twin'];
 
 /** The main special piece of the day. */
 export function featureFor(day: string): Feature {
@@ -59,7 +59,10 @@ const placementOrder = (fs: Feature[]) => {
   return [...fs].sort((a, b) => rank(a) - rank(b));
 };
 
-function buildCandidate(day: string, attempt: number, features: Feature[]): Level {
+/** Extra settings for Voyage levels. Daily levels use none, so they are unchanged. */
+export type Tuning = { mirror?: [number, number]; orbits?: boolean };
+
+function buildCandidate(day: string, attempt: number, features: Feature[], tuning: Tuning = {}): Level {
   const r = rng(hash(`${day}#${attempt}`));
   const between = (a: number, b: number) => a + (b - a) * r();
   const pick = <T,>(arr: T[]) => arr[Math.floor(r() * arr.length)];
@@ -103,6 +106,8 @@ function buildCandidate(day: string, attempt: number, features: Feature[]): Leve
   level.moon.start = { x: round(start.x), z: round(start.z) };
   level.moon.startAngle = Math.floor(r() * 36) * 10;
   addVariety(level, r);
+  // Voyage: keep the moon's mirror within a size band (wide early on, small later)
+  if (tuning.mirror) level.mirrorHalf = round(Math.min(tuning.mirror[1], Math.max(tuning.mirror[0], level.mirrorHalf)));
   addSystem(level, r);
   // pieces go in after the star system is built, so they sit on the beam's real path
   for (const f of placementOrder(features)) {
@@ -466,17 +471,27 @@ function addOrbits(day: string, level: Level, solution: Placement) {
 }
 
 export function generateLevel(day: string): Generated {
-  const features = featuresFor(day);
+  return generateFrom(day, featuresFor(day));
+}
+
+/**
+ * Builds a solvable level from any seed string with the given pieces. With `strict`, pieces are never
+ * dropped and null is returned when no level can be made (Voyage levels must have their piece).
+ */
+export function generateFrom(seed: string, features: Feature[], tuning?: Tuning): Generated;
+export function generateFrom(seed: string, features: Feature[], tuning: Tuning, strict: boolean): Generated | null;
+export function generateFrom(seed: string, features: Feature[], tuning: Tuning = {}, strict = false): Generated | null {
   for (let attempt = 0; attempt < 80; attempt++) {
     // after many failed tries, drop the second piece, then fall back to a plain level for the day
-    const fs: Feature[] = attempt < 60 ? (attempt < 40 ? features : features.slice(0, 1)) : ['plain'];
-    const level = buildCandidate(day, attempt, fs);
+    const fs: Feature[] = strict ? features : attempt < 60 ? (attempt < 40 ? features : features.slice(0, 1)) : ['plain'];
+    const level = buildCandidate(seed, attempt, fs, tuning);
     if (!fs.every((f) => hasFeature(level, f))) continue;
     // every board has at least two gravity bodies (giant or sun, plus a planet)
     if (!level.bodies.some((b) => b.kind === 'planet')) continue;
     const ok = validate(level);
-    if (ok) addOrbits(day, level, ok.solution);
+    if (ok && tuning.orbits !== false) addOrbits(seed, level, ok.solution);
     if (ok) return { level, solution: ok.solution, solutions: ok.solutions, solvable: ok.solvable, attempts: attempt + 1 };
   }
-  return { level: FALLBACK_LEVEL(day), solution: { moon: { x: 10, z: 3 }, angle: 230 }, solutions: 0, attempts: 80 };
+  if (strict) return null;
+  return { level: FALLBACK_LEVEL(seed), solution: { moon: { x: 10, z: 3 }, angle: 230 }, solutions: 0, attempts: 80 };
 }
