@@ -481,6 +481,24 @@ describe('server game', () => {
   });
 });
 
+describe('scripts on a day without orbiting moons', () => {
+  test("the friends' solver payload (placement only) is rejected with a message", async () => {
+    setStoreForTests(new MemoryStore());
+    const day = '2026-11-14'; // a past day (archive), not used by any other test
+    // a straight shot that wins, on a board with no orbiting moons, so there is no moon clock to check
+    const level: Level = { ...FALLBACK_LEVEL(day), emitter: { x: -20, z: 0, dir: 0 }, target: { x: 20, z: 0, r: 1.5 }, bodies: [], splitters: [], wormholes: [], rocks: [] };
+    expect(level.orbitPeriod).toBeUndefined();
+    const placement = { moon: { x: -25, z: 20 }, angle: 0, satellite: null };
+    expect(trace(level, placement).result).toBe('hit');
+    await getStoreForTest().setCached(`level:v5:${day}`, JSON.stringify({ level, solution: placement, solutions: 1, attempts: 1 }), 60);
+    await setName('s', 'Scripter');
+    await today('s', day, NOW - 60_000);
+    // exactly what the script posts: { placement } and nothing else
+    await expect(shoot('s', placement, day, {}, NOW)).rejects.toMatchObject({ status: 403, message: expect.stringContaining('looks like a script') });
+    expect((await today('s', day, NOW)).me.play.shots).toEqual([]); // no shot used up
+  });
+});
+
 describe('moon clock', () => {
   const level = { ...FALLBACK_LEVEL(DAY), orbitPeriod: ORBIT_PERIOD };
   const at = (sec: number) => NOW + sec * 1000;
