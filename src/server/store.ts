@@ -11,6 +11,11 @@ export type BoardEntry = { rank: number; name: string; score: number; games: num
 export type Streak = { current: number; best: number };
 /** Server-only facts about a play, kept out of `Play` so they are never sent to the browser. */
 export type ShotMeta = { seen: number | null; lastT: number | null };
+/** A finished day in a player's history. */
+export type DayResult = { status: 'won' | 'lost'; score: number };
+/** Voyage progress: the highest level open, best stars per level, and the shots of the attempt in progress. */
+export type VoyageRow = { unlocked: number; stars: Record<number, number>; attempt: { n: number; shots: string[] } };
+export const newVoyage = (): VoyageRow => ({ unlocked: 1, stars: {}, attempt: { n: 1, shots: [] } });
 
 export interface Store {
   getName(pid: string): Promise<string | null>;
@@ -29,8 +34,15 @@ export interface Store {
   /** Remembers when this player first saw today's board (only the first call counts). */
   markSeen(day: string, pid: string, ms: number): Promise<void>;
   getShotMeta(day: string, pid: string): Promise<ShotMeta>;
-  /** Finishes the day once. Returns false if it was already finished. */
-  finish(day: string, pid: string, status: 'won' | 'lost', score: number): Promise<boolean>;
+  /**
+   * Finishes the day once. Returns false if it was already finished. Only `ranked` games (today's
+   * puzzle) count for the leaderboards and the streak; archive games are only kept in the history.
+   */
+  finish(day: string, pid: string, status: 'won' | 'lost', score: number, ranked?: boolean): Promise<boolean>;
+  /** The player's finished days among `days`. */
+  getHistory(pid: string, days: string[]): Promise<Record<string, DayResult>>;
+  getVoyage(pid: string): Promise<VoyageRow>;
+  setVoyage(pid: string, row: VoyageRow): Promise<void>;
   /** The top 10, plus the block of 10 around `pid` when they rank lower (see `windowStart`). */
   board(scope: 'day' | 'all', day: string, pid: string | null): Promise<{ top: BoardEntry[]; around: BoardEntry[]; me: BoardEntry | null; players: number }>;
   getStreak(pid: string, day: string): Promise<Streak>;
@@ -59,7 +71,10 @@ export function liveStreak(row: StreakRow | null, day: string): Streak {
   return { current: alive ? row.current : 0, best: row.best };
 }
 
-const DAY_TTL = 60 * 60 * 24 * 90;
+// plays are kept for over a year, so past days stay marked as played in the archive
+const DAY_TTL = 60 * 60 * 24 * 400;
+/** Days finished before this were played before the history existed; their results are read from the plays once. */
+const HISTORY_SINCE = '2026-11-24';
 // Preview deployments share the production database, so they keep their data under their own
 // prefix: testing a preview link never adds players or scores to the live leaderboard.
 const NS = process.env.VERCEL_ENV === 'preview' ? 'orbit-preview' : 'orbit';
@@ -73,6 +88,8 @@ const k = {
   games: `${NS}:lb:games`,
   best: `${NS}:lb:best`,
   streak: (pid: string) => `${NS}:player:${pid}:streak`,
+  history: (pid: string) => `${NS}:player:${pid}:history`,
+  voyage: (pid: string) => `${NS}:player:${pid}:voyage`,
   names: `${NS}:names`,
   cache: (key: string) => `${NS}:cache:${key}`,
 };
@@ -134,10 +151,12 @@ class RedisStore implements Store {
     const num = (v: unknown) => (v === null || v === undefined || v === '' ? null : Number(v));
     return { seen: num(seen), lastT: num(lastT) };
   }
-  async finish(day: string, pid: string, status: 'won' | 'lost', score: number) {
+  async finish(day: string, pid: string, status: 'won' | 'lost', score: number, ranked = true) {
     const first = await this.r.set(k.done(day, pid), 1, { nx: true, ex: DAY_TTL });
     if (first !== 'OK') return false;
     await this.r.hset(k.play(day, pid), { status, score });
+    await this.r.hset(k.history(pid), { [day]: `${status}:${score}` });
+    if (!ranked) return true;
     const prev = await this.streakRow(pid);
     const st = nextStreak(prev, day, status === 'won');
     const p = this.r.pipeline();
@@ -156,6 +175,33 @@ class RedisStore implements Store {
   }
   async getStreak(pid: string, day: string) {
     return liveStreak(await this.streakRow(pid), day);
+  }
+  async getHistory(pid: string, days: string[]) {
+    const h = (await this.r.hgetall<Record<string, unknown>>(k.history(pid))) ?? {};
+    const out: Record<string, DayResult> = {};
+    for (const day of days) if (h[day]) out[day] = parseResult(String(h[day]));
+    // days from before the history existed: look at the plays themselves, once
+    const old = days.filter((d) => d < HISTORY_SINCE && !h[d]);
+    if (old.length) {
+      const p = this.r.pipeline();
+      for (const d of old) p.hgetall(k.play(d, pid));
+      const plays = (await p.exec()) as (Record<string, unknown> | null)[];
+      const found: Record<string, string> = {};
+      old.forEach((d, i) => {
+        const st = plays[i]?.status;
+        if (st === 'won' || st === 'lost') { found[d] = `${st}:${Number(plays[i]?.score ?? 0)}`; out[d] = parseResult(found[d]); }
+      });
+      if (Object.keys(found).length) await this.r.hset(k.history(pid), found);
+    }
+    return out;
+  }
+  async getVoyage(pid: string) {
+    const v = await this.r.get<unknown>(k.voyage(pid));
+    if (!v) return newVoyage();
+    return { ...newVoyage(), ...(typeof v === 'string' ? JSON.parse(v) : v) } as VoyageRow;
+  }
+  async setVoyage(pid: string, row: VoyageRow) {
+    await this.r.set(k.voyage(pid), JSON.stringify(row));
   }
   async getCached(key: string) {
     const v = await this.r.get<unknown>(k.cache(key));
@@ -203,6 +249,11 @@ class RedisStore implements Store {
     return { top, around, me, players };
   }
 }
+
+const parseResult = (v: string): DayResult => {
+  const [status, score] = v.split(':');
+  return { status: status === 'won' ? 'won' : 'lost', score: Number(score) || 0 };
+};
 
 /** The board shows the top 10, then the block of 10 holding your rank (rank 508 shows 501 to 510). */
 export const TOP = 10;
@@ -283,11 +334,12 @@ export class MemoryStore implements Store {
   }
   async markSeen(day: string, pid: string, ms: number) { const m = this.metaFor(day, pid); m.seen ??= ms; }
   async getShotMeta(day: string, pid: string) { return { ...this.metaFor(day, pid) }; }
-  async finish(day: string, pid: string, status: 'won' | 'lost', score: number) {
+  async finish(day: string, pid: string, status: 'won' | 'lost', score: number, ranked = true) {
     const key = `${day}:${pid}`;
     if (this.done.has(key)) return false;
     this.done.add(key);
     Object.assign(this.play(day, pid), { status, score });
+    if (!ranked) return true;
     if (!this.dayBoards.has(day)) this.dayBoards.set(day, new Map());
     this.dayBoards.get(day)!.set(pid, score);
     this.allBoard.set(pid, (this.allBoard.get(pid) ?? 0) + score);
@@ -295,7 +347,17 @@ export class MemoryStore implements Store {
     this.streaks.set(pid, nextStreak(this.streaks.get(pid) ?? null, day, status === 'won'));
     return true;
   }
-
+  async getHistory(pid: string, days: string[]) {
+    const out: Record<string, DayResult> = {};
+    for (const day of days) {
+      const p = this.plays.get(`${day}:${pid}`);
+      if (p && p.status !== 'playing') out[day] = { status: p.status, score: p.score };
+    }
+    return out;
+  }
+  voyages = new Map<string, VoyageRow>();
+  async getVoyage(pid: string) { return structuredClone(this.voyages.get(pid) ?? newVoyage()); }
+  async setVoyage(pid: string, row: VoyageRow) { this.voyages.set(pid, structuredClone(row)); }
   async board(scope: 'day' | 'all', day: string, pid: string | null) {
     const m = scope === 'day' ? this.dayBoards.get(day) ?? new Map<string, number>() : this.allBoard;
     const ranked = rankEntries([...m.entries()].map(([id, score]): BoardEntry => ({

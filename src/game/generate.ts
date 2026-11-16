@@ -39,7 +39,7 @@ const round = (n: number, d = 2) => Math.round(n * 10 ** d) / 10 ** d;
 
 export type Feature = 'plain' | 'blackhole' | 'splitter' | 'wormhole' | 'mirrors' | 'relay' | 'repulsor' | 'twin';
 
-const NEW_POOL: Feature[] = ['blackhole', 'splitter', 'wormhole', 'mirrors', 'relay', 'repulsor', 'twin'];
+export const NEW_POOL: Feature[] = ['blackhole', 'splitter', 'wormhole', 'mirrors', 'relay', 'repulsor', 'twin'];
 
 /** What the random streams are seeded from: the day alone, or the day plus the server's secret. */
 const seedKey = (day: string, secret = '') => (secret ? `${secret}|${day}` : day);
@@ -66,8 +66,14 @@ const placementOrder = (fs: Feature[]) => {
   return [...fs].sort((a, b) => rank(a) - rank(b));
 };
 
-function buildCandidate(day: string, attempt: number, features: Feature[], secret: string): Level {
-  const r = rng(hash(`${seedKey(day, secret)}#${attempt}`));
+/**
+ * Extra settings for Voyage levels; daily levels use none, so they are unchanged. `secret` is the
+ * server's seed secret, mixed into every random stream (daily levels only: Voyage levels are public).
+ */
+export type Tuning = { mirror?: [number, number]; orbits?: boolean; secret?: string };
+
+function buildCandidate(day: string, attempt: number, features: Feature[], tuning: Tuning = {}): Level {
+  const r = rng(hash(`${seedKey(day, tuning.secret)}#${attempt}`));
   const between = (a: number, b: number) => a + (b - a) * r();
   const pick = <T,>(arr: T[]) => arr[Math.floor(r() * arr.length)];
   const side = r() < 0.5 ? -1 : 1;
@@ -110,6 +116,8 @@ function buildCandidate(day: string, attempt: number, features: Feature[], secre
   level.moon.start = { x: round(start.x), z: round(start.z) };
   level.moon.startAngle = Math.floor(r() * 36) * 10;
   addVariety(level, r);
+  // Voyage: keep the moon's mirror within a size band (wide early on, small later)
+  if (tuning.mirror) level.mirrorHalf = round(Math.min(tuning.mirror[1], Math.max(tuning.mirror[0], level.mirrorHalf)));
   addSystem(level, r);
   // pieces go in after the star system is built, so they sit on the beam's real path
   for (const f of placementOrder(features)) {
@@ -473,17 +481,27 @@ function addOrbits(day: string, level: Level, solution: Placement, secret: strin
 }
 
 export function generateLevel(day: string, secret = ''): Generated {
-  const features = featuresFor(day, secret);
+  return generateFrom(day, featuresFor(day, secret), { secret });
+}
+
+/**
+ * Builds a solvable level from any seed string with the given pieces. With `strict`, pieces are never
+ * dropped and null is returned when no level can be made (Voyage levels must have their piece).
+ */
+export function generateFrom(seed: string, features: Feature[], tuning?: Tuning): Generated;
+export function generateFrom(seed: string, features: Feature[], tuning: Tuning, strict: boolean): Generated | null;
+export function generateFrom(seed: string, features: Feature[], tuning: Tuning = {}, strict = false): Generated | null {
   for (let attempt = 0; attempt < 80; attempt++) {
     // after many failed tries, drop the second piece, then fall back to a plain level for the day
-    const fs: Feature[] = attempt < 60 ? (attempt < 40 ? features : features.slice(0, 1)) : ['plain'];
-    const level = buildCandidate(day, attempt, fs, secret);
+    const fs: Feature[] = strict ? features : attempt < 60 ? (attempt < 40 ? features : features.slice(0, 1)) : ['plain'];
+    const level = buildCandidate(seed, attempt, fs, tuning);
     if (!fs.every((f) => hasFeature(level, f))) continue;
     // every board has at least two gravity bodies (giant or sun, plus a planet)
     if (!level.bodies.some((b) => b.kind === 'planet')) continue;
     const ok = validate(level);
-    if (ok) addOrbits(day, level, ok.solution, secret);
+    if (ok && tuning.orbits !== false) addOrbits(seed, level, ok.solution, tuning.secret ?? '');
     if (ok) return { level, solution: ok.solution, solutions: ok.solutions, solvable: ok.solvable, attempts: attempt + 1 };
   }
-  return { level: FALLBACK_LEVEL(day), solution: { moon: { x: 10, z: 3 }, angle: 230 }, solutions: 0, attempts: 80 };
+  if (strict) return null;
+  return { level: FALLBACK_LEVEL(seed), solution: { moon: { x: 10, z: 3 }, angle: 230 }, solutions: 0, attempts: 80 };
 }

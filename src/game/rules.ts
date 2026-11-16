@@ -45,15 +45,21 @@ export function msUntilNextPuzzle(now = new Date()): number {
   return next - now.getTime();
 }
 
-export function shareText(opts: { number: number; shots: string[]; score: number; helpers: HelperId[]; streak?: number }): string {
+/** `archive`: a past day played later, marked so it is not mistaken for that day's result. */
+export function shareText(opts: { number: number; shots: string[]; score: number; helpers: HelperId[]; streak?: number; archive?: boolean }): string {
   const squares = opts.shots.map((r) => (r === 'hit' ? '🟩' : '🟥')).join('') + '⬛'.repeat(MAX_SHOTS - opts.shots.length);
   const helperIcons = opts.helpers.map((h) => ({ scanner: '📡', satellite: '🛰️', energized: '💥', ghost: '👻' })[h]).join('');
   const won = opts.shots.includes('hit');
   return [
-    `ORBIT #${opts.number} 🪐`,
+    `ORBIT #${opts.number} 🪐${opts.archive ? ' (archive)' : ''}`,
     `${squares}  ${won ? opts.score + ' pts' : 'beacon dark'}`,
     helperIcons ? `helpers ${helperIcons}` : 'no helpers',
-    ...(opts.streak && opts.streak > 1 ? [`🔥 ${opts.streak}-day streak`] : []),
+    ...(!opts.archive && opts.streak && opts.streak > 1 ? [`🔥 ${opts.streak}-day streak`] : []),
     SITE_NAME, // so anyone who sees a result can click through and play
   ].join('\n');
+}
+
+/** Share text for a cleared Voyage level. */
+export function voyageShareText(n: number, stars: number): string {
+  return [`ORBIT Voyage · level ${n} 🚀`, '★'.repeat(stars) + '☆'.repeat(MAX_SHOTS - stars), SITE_NAME].join('\n');
 }

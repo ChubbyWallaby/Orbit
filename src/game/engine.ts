@@ -24,8 +24,10 @@ export type Relay = Vec & { r: number };
 export type Emitter = Vec & { dir: number; style?: string }; // dir in radians
 
 export type Level = {
-  day: string; // UTC date, YYYY-MM-DD
-  number: number; // puzzle number since launch
+  day: string; // UTC date, YYYY-MM-DD (Voyage levels: voyage-N)
+  number: number; // puzzle number since launch (Voyage levels: the level number)
+  /** Set on Voyage levels: the level number. */
+  voyage?: number;
   emitter: Emitter;
   /** More laser stations firing at the same moment. Any beam that reaches the beacon wins. */
   extraEmitters?: Emitter[];

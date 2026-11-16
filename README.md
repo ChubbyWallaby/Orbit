@@ -29,14 +29,26 @@ Every shot is checked on the server: it re-runs the physics, counts the shot, an
 
 Shots from scripts are turned away. The page runs the moons on the server's clock, and a shot whose moons are more than 10 seconds away from where they really are is rejected; firing again at the moment the last shot froze is still fine. A winning shot is also rejected, with a message and without using up a shot, if the page reports no drag or turn of the moon, mirror or satellite, or if it comes less than 20 seconds after the pilot first opened the day's board. Misses are never checked. This stops copy-paste solvers, not a determined cheat: the board and the physics have to reach the browser for the aiming line to work.
 
+## More puzzles
+
+After today's puzzle, **More puzzles** offers two ways to keep playing. Neither counts for the leaderboards or the streak.
+
+- **Past days**: every earlier daily puzzle, playable once each if you haven't finished it (`?day=YYYY-MM-DD`). Helpers work as usual, and the result is marked "(archive)" when shared.
+- **Voyage**: numbered levels, the same for everyone, that get harder as you go (`?voyage=N`). Each level gives 3 shots; a hit earns 3, 2 or 1 stars, opens the next level, and you can retry or replay any open level. Progress is saved on the server.
+  - Levels 1–6 are plain boards with a wide mirror and a long aiming line; moons stand still until level 13.
+  - Levels 7–27 bring in one piece per chapter of three (black holes, fixed mirrors, repulsors, wormholes, splitters, fading light, twin stations), ordered easiest to hardest by how many winning shots the solver finds.
+  - From level 28, Deep Space mixes pieces: two pieces sometimes from 45 and always from 70, and smaller mirrors from 50. It never ends.
+  - Levels 1–60 are prebuilt in `src/game/voyage-levels.json` (rebuild with `npx tsx scripts/build-voyage.ts`, about 10 minutes). Later levels are generated the first time someone reaches them and kept in the store.
+
 ## Project layout
 
 - `src/game/engine.ts`: light-bending physics and mirror reflections, shared by browser and server
 - `src/game/generate.ts`: deterministic daily level generator plus a solver that guarantees each level is winnable with a bounce
+- `src/game/voyage-spec.ts`, `src/game/voyage.ts`: the Voyage difficulty curve and level builder
 - `src/game/rules.ts`: scoring, helpers, puzzle calendar, share text
 - `src/game/scene.ts`: three.js renderer
 - `src/server/`: game service, Redis store, cookie-based player id
-- `src/app/api/*`: `today`, `player`, `helper`, `shot`, `leaderboard`
+- `src/app/api/*`: `today`, `player`, `helper`, `shot`, `leaderboard`, `archive`, `voyage`
 
 ## Running locally
 

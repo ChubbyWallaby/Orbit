@@ -5,7 +5,7 @@ import { pidHeaders } from './pid';
 
 type Board = { scope: 'day' | 'all'; top: BoardEntry[]; around: BoardEntry[]; me: BoardEntry | null; players: number };
 
-export default function Leaderboard({ onClose, puzzleNumber }: { onClose: () => void; puzzleNumber: number }) {
+export default function Leaderboard({ onClose, puzzleNumber }: { onClose: () => void; puzzleNumber?: number }) {
   const [scope, setScope] = useState<'all' | 'day'>('all');
   const [board, setBoard] = useState<Board | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +38,7 @@ export default function Leaderboard({ onClose, puzzleNumber }: { onClose: () => 
         </div>
         <div className="tabs" role="tablist">
           <button role="tab" aria-selected={scope === 'all'} onClick={() => pick('all')}>All time</button>
-          <button role="tab" aria-selected={scope === 'day'} onClick={() => pick('day')}>Today · #{puzzleNumber}</button>
+          <button role="tab" aria-selected={scope === 'day'} onClick={() => pick('day')}>Today{puzzleNumber ? ` · #${puzzleNumber}` : ''}</button>
         </div>
         <p>
           {scope === 'all' ? 'Points added up over every daily puzzle played.' : 'Scores for today’s puzzle. Resets at midnight UTC.'}

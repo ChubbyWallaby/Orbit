@@ -1,9 +1,11 @@
 import { shoot } from '@/server/game';
-import { body, handle, readPid } from '@/server/http';
+import { body, ensurePid, handle, readPid } from '@/server/http';
 
 export async function POST(req: Request) {
   return handle(async () => {
-    const { placement, moves, slow } = await body(req);
-    return shoot(await readPid(), placement, undefined, { moves, slow });
+    const { placement, day, moves, slow } = await body(req);
+    // archive days need no pilot name, only a player id, so make one if needed
+    const pid = day ? await ensurePid() : await readPid();
+    return { ...(await shoot(pid, placement, day, { moves, slow })), pid };
   });
 }
