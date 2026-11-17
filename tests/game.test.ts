@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { bodiesAt, constrainMoon, orbitClock, previewLimit, trace, withDestroyed, type Level } from '@/game/engine';
 import { generateLevel, featuresFor, FALLBACK_LEVEL, ORBIT_PERIOD } from '@/game/generate';
-import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle } from '@/game/rules';
+import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle, missText } from '@/game/rules';
 import { MemoryStore, getStore as getStoreForTest, setStoreForTests, nextStreak, liveStreak, rankEntries, windowStart } from '@/server/store';
 import { isJsonRequest, pickPid, pidCookieOptions } from '@/server/pid';
 import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, archive, checkClock, resolveDay, voyage, voyageShot, voyageLevelFor, GameError, VOYAGE_MIN_SOLVE_MS, CLOCK_SLACK, MIN_SOLVE_MS } from '@/server/game';
@@ -217,6 +217,16 @@ describe('pieces', () => {
     const res = trace(level, farMoon);
     expect(res).toMatchObject({ result: 'hit', bounces: 1 });
     expect(res.rays.length).toBe(1);
+  });
+
+  test('a beam that fades after the relay is told so, not sent back to the relay', () => {
+    const noRelay = bare({ range: 25 });
+    expect(missText(noRelay, trace(noRelay, farMoon))).toBe('The light faded out. Pass the relay ring to recharge it.');
+    // the ring sits early on the beam: it recharges the light, which still runs out before the beacon
+    const early = bare({ range: 25, relays: [{ x: -15, z: 0, r: 1.2 }] });
+    const res = trace(early, farMoon);
+    expect(res.result).toBe('faded');
+    expect(missText(early, res)).toBe('The relay recharged the light, but it faded again 25 units later. Bounce it towards the beacon sooner.');
   });
 
   test('light fades after its range, and a relay ring recharges it', () => {

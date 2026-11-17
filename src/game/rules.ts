@@ -1,4 +1,5 @@
 // Scoring, helpers and puzzle calendar. Shared by client and server.
+import type { Level, TraceResult } from './engine';
 
 export const MAX_SHOTS = 3;
 export const SHOT_BASE = [1000, 700, 400] as const;
@@ -62,4 +63,21 @@ export function shareText(opts: { number: number; shots: string[]; score: number
 /** Share text for a cleared Voyage level. */
 export function voyageShareText(n: number, stars: number): string {
   return [`ORBIT Voyage · level ${n} 🚀`, '★'.repeat(stars) + '☆'.repeat(MAX_SHOTS - stars), SITE_NAME].join('\n');
+}
+
+/** Why a shot did not reach the beacon. */
+export function missText(level: Level, res: Pick<TraceResult, 'result' | 'hitName' | 'rays'>): string {
+  if (res.result === 'absorbed') {
+    const kind = level.bodies.find((b) => b.name === res.hitName)?.kind;
+    const verb = kind === 'blackhole' ? 'Swallowed by black hole' : kind === 'sun' ? 'Burned up in the sun' : kind === 'repulsor' ? 'Scattered by repulsor' : 'Pulled into';
+    return `${verb} ${res.hitName}.`;
+  }
+  if (res.result === 'rock') return 'Blocked by the asteroid belt.';
+  if (res.result === 'faded') {
+    // a relay refills the range once per pass: light that went through it can still run out further on
+    const relayed = res.rays.some((ray) => ray.result === 'faded' && ray.pts.some((p) => p.relay));
+    if (relayed && level.range) return `The relay recharged the light, but it faded again ${Math.round(level.range)} units later. Bounce it towards the beacon sooner.`;
+    return 'The light faded out. Pass the relay ring to recharge it.';
+  }
+  return 'Lost in deep space.';
 }
