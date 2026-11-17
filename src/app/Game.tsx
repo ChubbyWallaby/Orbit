@@ -1,7 +1,7 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { constrainMoon, previewLimit, trace, orbitClock, withDestroyed, SATELLITE_RADIUS, type Level, type Placement, type TraceResult, type Vec } from '@/game/engine';
-import { HELPER_ORDER, HELPERS, MAX_SHOTS, msUntilNextPuzzle, scoreFor, shareText, voyageShareText, type HelperId } from '@/game/rules';
+import { HELPER_ORDER, HELPERS, MAX_SHOTS, msUntilNextPuzzle, scoreFor, shareText, voyageShareText, missText, type HelperId } from '@/game/rules';
 import type { OrbitScene } from '@/game/scene';
 import type { TodayPayload, VoyageInfo, VoyagePayload } from '@/server/game';
 import type { Play, Streak } from '@/server/store';
@@ -112,7 +112,7 @@ function todaysPieces(level: Level): { label: string; intro: string }[] {
     out.push({ label: n === 1 ? 'Fixed mirror' : `${n} fixed mirrors`, intro: `${n === 1 ? 'A fixed mirror' : `${n} fixed mirrors`} (gold frames) bounce the beam too. Use them for bank shots.` });
   }
   if (level.relays?.length && level.range) {
-    out.push({ label: `Fading light · relay`, intro: `The light fades after ${Math.round(level.range)} units. Send it through the gold relay ring to recharge it.` });
+    out.push({ label: `Fading light · relay`, intro: `The light fades after ${Math.round(level.range)} units. The gold relay ring recharges it for another ${Math.round(level.range)}, so bounce it to the beacon within that reach.` });
   }
   return out;
 }
@@ -120,18 +120,6 @@ function todaysPieces(level: Level): { label: string; intro: string }[] {
 function pieceIntro(level: Level, lead = 'Today:'): string | null {
   const pieces = todaysPieces(level);
   return pieces.length ? `${lead} ${pieces.map((p) => p.intro).join(' ')}` : null;
-}
-
-/** Why a shot did not reach the beacon. */
-function missText(level: Level, result: TraceResult['result'], hitName: string | null): string {
-  if (result === 'absorbed') {
-    const kind = level.bodies.find((b) => b.name === hitName)?.kind;
-    const verb = kind === 'blackhole' ? 'Swallowed by black hole' : kind === 'sun' ? 'Burned up in the sun' : kind === 'repulsor' ? 'Scattered by repulsor' : 'Pulled into';
-    return `${verb} ${hitName}.`;
-  }
-  if (result === 'rock') return 'Blocked by the asteroid belt.';
-  if (result === 'faded') return 'The light faded out. Pass the relay ring to recharge it.';
-  return 'Lost in deep space.';
 }
 
 export default function Game() {
@@ -340,7 +328,8 @@ export default function Game() {
     try {
       const res = await api<{ result: TraceResult['result']; hitName: string | null; destroyed: number[]; score: number; status: Play['status']; play: Play; streak: Streak; pid: string }>('/api/shot', { placement: shot, moves: moves.current, slow: s?.slowOrbits ?? false, ...(archiveDay ? { day: archiveDay } : {}) });
       savePid(res.pid);
-      if (s) await s.fire(trace(withDestroyed(level, destroyed), shot), energized);
+      const traced = trace(withDestroyed(level, destroyed), shot);
+      if (s) await s.fire(traced, energized);
       beamFor.current = placement;
       setPlay(res.play);
       setStreak(res.streak);
@@ -349,7 +338,7 @@ export default function Game() {
       if (res.result === 'hit') setStatus({ text: `Beacon lit! +${res.score} points.`, kind: 'good' });
       // with a beam splitter, one beam can destroy an asteroid while the other goes elsewhere
       else if (res.destroyed.length) setStatus({ text: `Asteroid destroyed! The way is clearer for your next shot.${tail}`, kind: 'bad' });
-      else setStatus({ text: `${missText(level, res.result, res.hitName)}${tail}`, kind: 'bad' });
+      else setStatus({ text: `${missText(level, { ...res, rays: traced.rays })}${tail}`, kind: 'bad' });
       if (res.status !== 'playing') {
         track(archiveDay ? 'archive_finished' : 'finished', { result: res.status, shots: res.play.shots.length, helpers: res.play.helpers.length, score: res.score });
         if (res.status === 'lost') setStatus({ text: archiveDay ? 'Out of shots. The beacon stays dark on this day.' : 'Out of shots. The beacon stays dark today.', kind: 'bad' });
@@ -378,7 +367,8 @@ export default function Game() {
     try {
       const res = await api<{ result: TraceResult['result']; hitName: string | null; shots: string[]; status: Play['status']; stars: number; best: number; unlocked: number; starsByLevel: Record<number, number>; pid: string }>('/api/voyage', { n: voy.n, placement: shot, moves: moves.current, slow: s?.slowOrbits ?? false });
       savePid(res.pid);
-      if (s) await s.fire(trace(level, shot), false);
+      const traced = trace(level, shot);
+      if (s) await s.fire(traced, false);
       beamFor.current = placement;
       setPlay({ ...freshPlay(), shots: res.shots, status: res.status, score: res.stars });
       setVoy({ ...voy, unlocked: res.unlocked, stars: res.starsByLevel });
@@ -389,8 +379,8 @@ export default function Game() {
         setTimeout(() => setResultOpen(true), 900);
       } else if (res.status === 'lost') {
         track('voyage_failed', { level: voy.n });
-        setStatus({ text: `${missText(level, res.result, res.hitName)} Out of shots. Try again: the level stays the same.`, kind: 'bad' });
-      } else setStatus({ text: `${missText(level, res.result, res.hitName)} ${left} ${left === 1 ? 'shot' : 'shots'} left.`, kind: 'bad' });
+        setStatus({ text: `${missText(level, { ...res, rays: traced.rays })} Out of shots. Try again: the level stays the same.`, kind: 'bad' });
+      } else setStatus({ text: `${missText(level, { ...res, rays: traced.rays })} ${left} ${left === 1 ? 'shot' : 'shots'} left.`, kind: 'bad' });
     } catch (e) {
       setHeldT(null);
       setStatus({ text: (e as Error).message, kind: 'bad' });
@@ -423,7 +413,7 @@ export default function Game() {
     beamFor.current = placement;
     if (res.result === 'hit') setStatus({ text: 'Practice: beacon lit! This one doesn’t count.', kind: 'good' });
     else if (energized && res.rocksHit.length) setStatus({ text: 'Practice: asteroid destroyed!', kind: 'bad' });
-    else setStatus({ text: `Practice: ${missText(level, res.result, res.hitName)}`, kind: 'bad' });
+    else setStatus({ text: `Practice: ${missText(level, res)}`, kind: 'bad' });
     setBusy(false);
   };
 
