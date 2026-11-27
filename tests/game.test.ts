@@ -4,7 +4,7 @@ import { generateLevel, featuresFor, FALLBACK_LEVEL, ORBIT_PERIOD } from '@/game
 import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle, missText } from '@/game/rules';
 import { MemoryStore, getStore as getStoreForTest, setStoreForTests, nextStreak, liveStreak, rankEntries, windowStart } from '@/server/store';
 import { isJsonRequest, pickPid, pidCookieOptions } from '@/server/pid';
-import { cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, archive, checkClock, resolveDay, voyage, voyageShot, voyageLevelFor, GameError, VOYAGE_MIN_SOLVE_MS, CLOCK_SLACK, MIN_SOLVE_MS } from '@/server/game';
+import { autoName, cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, archive, checkClock, resolveDay, voyage, voyageShot, voyageLevelFor, GameError, VOYAGE_MIN_SOLVE_MS, CLOCK_SLACK, MIN_SOLVE_MS } from '@/server/game';
 import { voyageSpec, voyageStars, PREBUILT } from '@/game/voyage';
 import prebuilt from '@/game/voyage-levels.json';
 
@@ -387,8 +387,52 @@ describe('server game', () => {
     expect(await setName('b', 'Nova')).toBe('Nova');
   });
 
-  test('requires a name before shooting', async () => {
-    await expect(fire('a', sol(), DAY)).rejects.toThrow('Pick a pilot name');
+  test('a new visitor plays without picking a name, gets a generated one, and can change it', async () => {
+    expect((await today('a', DAY, NOW - MIN_SOLVE_MS)).me.name).toBeNull();
+    const first = await fire('a', miss(), DAY);
+    expect(first).toMatchObject({ shot: 1, status: 'playing', name: expect.stringMatching(/^[A-Z][a-z]+ \d{4}$/) });
+    const auto = first.name!;
+    expect(cleanName(auto)).toBe(auto);
+    expect((await today('a', DAY)).me.name).toBe(auto);
+    // the win counts and the generated name is on today's board
+    expect(await fire('a', sol(), DAY)).toMatchObject({ result: 'hit', status: 'won', score: 700, name: auto });
+    expect((await leaderboard('a', 'day', DAY)).top).toEqual([expect.objectContaining({ name: auto, score: 700, you: true })]);
+    // renaming keeps the points and frees the generated name
+    await setName('a', 'Ana');
+    expect((await leaderboard('a', 'day', DAY)).top[0]).toMatchObject({ name: 'Ana', score: 700 });
+    expect(await setName('b', auto)).toBe(auto);
+    // a pilot who already has a name keeps it
+    expect((await fire('b', miss(), DAY)).name).toBe(auto);
+  });
+
+  test('a helper also gives an unnamed pilot a name', async () => {
+    const r = await applyHelper('a', 'scanner', DAY);
+    expect(r).toMatchObject({ helpers: ['scanner'], name: expect.any(String) });
+  });
+
+  test('generated names never take a name someone already has', async () => {
+    // a random source that first lands on Nova 1000, which is taken, then on Comet 1000
+    const seq = [0, 0, 0, 0.1];
+    let i = 0;
+    const rand = () => seq[Math.min(i++, seq.length - 1)];
+    await setName('x', 'nova 1000');
+    expect(await autoName('a', rand)).toBe('Comet 1000');
+    expect((await today('a', DAY)).me.name).toBe('Comet 1000');
+  });
+
+  test('a shot with no player id is refused', async () => {
+    await expect(shoot(null, sol(), DAY, { moves: 3 }, NOW)).rejects.toMatchObject({ status: 401 });
+  });
+
+  test('unnamed pilots get the same script checks before their win counts', async () => {
+    await today('a', DAY, NOW - 60_000);
+    await expect(shoot('a', sol(), DAY, {}, NOW)).rejects.toThrow('looks like a script');
+    await today('b', DAY, NOW - 5_000);
+    await expect(shoot('b', sol(), DAY, { moves: 4 }, NOW)).rejects.toThrow('faster than a pilot');
+    // neither used up a shot or reached the board
+    expect((await today('a', DAY)).me.play.shots).toEqual([]);
+    expect((await today('b', DAY)).me.play.shots).toEqual([]);
+    expect((await leaderboard(null, 'day', DAY)).players).toBe(0);
   });
 
   test('win on second shot with a helper scores 700 - 150', async () => {
@@ -574,11 +618,9 @@ describe('archive', () => {
     expect((await archive(null)).days.every((d) => d.status === 'open')).toBe(true);
   });
 
-  test("today's puzzle still needs a name and still counts", async () => {
+  test("today's puzzle gives an unnamed pilot a name and still counts", async () => {
     const g = await levelFor('2026-11-12');
-    await expect(aimed('y', g.solution)).rejects.toThrow('Pick a pilot name');
-    await setName('y', 'Yan');
-    expect((await aimed('y', g.solution)).score).toBe(1000);
+    expect(await aimed('y', g.solution)).toMatchObject({ score: 1000, name: expect.any(String) });
     expect(store.allBoard.get('y')).toBe(1000);
     expect((await archive('y')).days.some((d) => d.day === '2026-11-12')).toBe(false); // today is not in the archive
   });

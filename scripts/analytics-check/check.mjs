@@ -32,7 +32,9 @@ const fail = (m) => { console.log('FAIL:', m); process.exitCode = 1; };
   await page.goto(BASE + '/', { waitUntil: 'networkidle' });
   await page.getByRole('button', { name: 'Fire', exact: true }).waitFor({ timeout: 60000 });
   // today's flow on main: the name form first (on the play-fix branch it is skipped)
+  let names_set = false;
   if (await page.locator('#pilot').count()) {
+    names_set = true;
     await page.locator('#pilot').fill('Tracker' + Math.floor(Math.random() * 1e6));
     await page.getByRole('button', { name: 'Start playing' }).click();
     await page.waitForTimeout(600);
@@ -51,6 +53,15 @@ const fail = (m) => { console.log('FAIL:', m); process.exitCode = 1; };
   await page.waitForTimeout(300);
   await page.locator('.card').getByRole('button', { name: 'Leaderboard' }).click();
   await page.waitForTimeout(800);
+  // with no name form up front, the pilot renames from the result card instead
+  if (!(await page.locator('#pilot').count()) && !names_set) {
+    await page.getByRole('button', { name: 'Close' }).click();
+    await page.getByRole('button', { name: 'Your result' }).click();
+    await page.getByRole('button', { name: 'Change name' }).click();
+    await page.locator('#pilot').fill('Tracker' + Math.floor(Math.random() * 1e6));
+    await page.getByRole('button', { name: 'Save name' }).click();
+    await page.waitForTimeout(600);
+  }
   const pid = await page.evaluate(() => localStorage.getItem('orbit:pid'));
   const storage = await page.evaluate(() => ({ local: Object.keys(localStorage), session: Object.keys(sessionStorage) }));
   const cookies = (await ctx.cookies()).map((c) => c.name);
