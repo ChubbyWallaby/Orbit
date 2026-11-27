@@ -120,17 +120,29 @@ export async function setName(pid: string, raw: unknown) {
   return name;
 }
 
-async function requirePlayer(pid: string | null) {
-  if (!pid) throw new GameError('Pick a pilot name first.', 401);
-  const name = await getStore().getName(pid);
-  if (!name) throw new GameError('Pick a pilot name first.', 401);
-  return pid;
+const PILOT_WORDS = ['Nova', 'Comet', 'Quasar', 'Pulsar', 'Nebula', 'Meteor', 'Photon', 'Zenith', 'Orion', 'Vega'];
+/**
+ * A pilot without a name gets one when they first play today's puzzle, so new visitors can play
+ * straight away and still appear on the leaderboard. They can change it any time.
+ */
+export async function autoName(pid: string, rand: () => number = Math.random): Promise<string> {
+  const store = getStore();
+  for (let i = 0; i < 20; i++) {
+    const digits = i < 10 ? 4 : 6; // widen the range if the short names are crowded
+    const n = Math.floor(rand() * 9 * 10 ** (digits - 1)) + 10 ** (digits - 1);
+    const name = `${PILOT_WORDS[Math.floor(rand() * PILOT_WORDS.length)]} ${n}`;
+    if (await store.claimName(pid, name)) {
+      await store.setName(pid, name);
+      return name;
+    }
+  }
+  throw new GameError('Could not give you a pilot name. Try again.', 503);
 }
 
-/** Today's puzzle needs a pilot name (for the leaderboard); archive days and Voyage only need a player id. */
+/** Today's puzzle needs a pilot name (for the leaderboard), given automatically if missing; archive days and Voyage only need a player id. */
 async function playerFor(pid: string | null, ranked: boolean) {
-  if (ranked) return requirePlayer(pid);
   if (!pid) throw new GameError('Could not tell who you are. Reload the page and try again.', 401);
+  if (ranked && !(await getStore().getName(pid))) await autoName(pid);
   return pid;
 }
 const finishedText = (ranked: boolean) => (ranked ? "Today's puzzle is already finished." : 'You already finished this puzzle.');
@@ -144,7 +156,7 @@ export async function applyHelper(pidIn: string | null, helper: unknown, rawDay?
   const play = await playFor(day, pid);
   if (play.status !== 'playing') throw new GameError(finishedText(ranked), 409);
   const helpers = await store.addHelper(day, pid, helper as HelperId);
-  return { helpers };
+  return { helpers, name: await store.getName(pid) };
 }
 
 const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
@@ -246,7 +258,7 @@ export async function shoot(pidIn: string | null, raw: unknown, rawDay?: unknown
     status = 'lost';
     await store.finish(day, pid, 'lost', 0, ranked);
   }
-  return { shot, result: res.result, bounces: res.bounces, hitName: res.hitName, destroyed, score, status, play: await store.getPlay(day, pid), streak: await store.getStreak(pid, currentDay()) };
+  return { shot, result: res.result, bounces: res.bounces, hitName: res.hitName, destroyed, score, status, play: await store.getPlay(day, pid), streak: await store.getStreak(pid, currentDay()), name: await store.getName(pid) };
 }
 
 // ---- Voyage ----

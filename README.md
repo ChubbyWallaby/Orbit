@@ -25,6 +25,8 @@ Small moons go round their planets on the dashed orbit ring, so the board change
 
 The all-time leaderboard adds up every day's points. There is also a board for today.
 
+New pilots can play straight away, without picking a name first. Their first shot (or helper) on today's puzzle gives them a generated pilot name such as `Nova 4821`, so a finished game always shows on the boards; they can change it from the result card or the leaderboard.
+
 Every shot is checked on the server: it re-runs the physics, counts the shot, and computes the score, so the browser cannot claim a result.
 
 Shots from scripts are turned away. The page runs the moons on the server's clock, and a shot whose moons are more than 10 seconds away from where they really are is rejected; firing again at the moment the last shot froze is still fine. A winning shot is also rejected, with a message and without using up a shot, if the page reports no drag or turn of the moon, mirror or satellite, or if it comes less than 20 seconds after the pilot first opened the day's board. Misses are never checked. This stops copy-paste solvers, not a determined cheat: the board and the physics have to reach the browser for the aiming line to work.

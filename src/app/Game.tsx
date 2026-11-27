@@ -149,7 +149,6 @@ export default function Game() {
   const [orbitT, setOrbitT] = useState(0);
   const [heldT, setHeldT] = useState<number | null>(null);
   const [status, setStatus] = useState<Status>({ text: START_TEXT });
-  const pendingFire = useRef(false);
   const moves = useRef(0);
   const dayRef = useRef<string | null>(null);
   const clockOffset = useRef(0);
@@ -244,14 +243,14 @@ export default function Game() {
       load(mode.n).catch((e) => live && setLoadError(e.message));
     } else {
       const day = mode.kind === 'archive' ? mode.day : undefined;
-      api<TodayPayload>(`/api/today${day ? `?day=${day}` : ''}`).then((d) => {
+      api<TodayPayload & { pid?: string }>(`/api/today${day ? `?day=${day}` : ''}`).then((d) => {
         if (!live) return;
+        savePid(d.pid);
         clockOffset.current = d.now - Date.now();
         setVoy(null);
         setName(d.me.name); setStreak(d.me.streak);
         show(d.level, d.me.play, pieceIntro(d.level, d.archive ? 'This day:' : 'Today:'));
         setData(d);
-        if (!d.me.name && !d.archive) setNameOpen(true);
         if (d.me.play.status !== 'playing') {
           setStatus(d.archive
             ? (d.me.play.status === 'won' ? { text: `You lit this beacon for ${d.me.play.score} points.`, kind: 'good' } : { text: 'The beacon stayed dark on this day.', kind: 'bad' })
@@ -318,7 +317,6 @@ export default function Game() {
 
   const fire = useCallback(async () => {
     if (!level || !placement || busy || finished || loading) return;
-    if (ranked && !name) { pendingFire.current = true; setNameOpen(true); return; }
     setBusy(true);
     setStatus({ text: 'Beam away…' });
     const s = sceneRef.current;
@@ -328,8 +326,10 @@ export default function Game() {
     const shot: Placement = level.orbitPeriod ? { ...placement, t } : placement;
     setHeldT(t); s?.holdOrbits(t);
     try {
-      const res = await api<{ result: TraceResult['result']; hitName: string | null; destroyed: number[]; score: number; status: Play['status']; play: Play; streak: Streak; pid: string }>('/api/shot', { placement: shot, moves: moves.current, slow: s?.slowOrbits ?? false, ...(archiveDay ? { day: archiveDay } : {}) });
+      const res = await api<{ result: TraceResult['result']; hitName: string | null; destroyed: number[]; score: number; status: Play['status']; play: Play; streak: Streak; pid: string; name: string | null }>('/api/shot', { placement: shot, moves: moves.current, slow: s?.slowOrbits ?? false, ...(archiveDay ? { day: archiveDay } : {}) });
       savePid(res.pid);
+      // a new pilot gets a generated name with their first shot today; they can change it afterwards
+      if (res.name) setName(res.name);
       const traced = trace(withDestroyed(level, destroyed), shot);
       if (s) await s.fire(traced, energized);
       beamFor.current = placement;
@@ -349,13 +349,12 @@ export default function Game() {
       }
     } catch (e) {
       const err = e as Error & { status?: number };
-      if (err.status === 401 && ranked) { setName(null); pendingFire.current = true; setNameOpen(true); }
       setHeldT(null);
       setStatus({ text: err.message, kind: 'bad' });
     } finally {
       setBusy(false);
     }
-  }, [level, placement, busy, finished, loading, name, energized, destroyed, ranked, archiveDay]);
+  }, [level, placement, busy, finished, loading, energized, destroyed, archiveDay]);
 
   // Voyage shots are checked on the server, which keeps the stars and opens the next level
   const voyageFire = async () => {
@@ -436,12 +435,12 @@ export default function Game() {
 
   const applyHelper = async (id: HelperId) => {
     if (!level || !placement || finished || helpers.includes(id) || isVoyage) return;
-    if (ranked && !name) { setNameOpen(true); return; }
     if (confirming !== id) { setConfirming(id); return; }
     setConfirming(null);
     try {
-      const r = await api<{ helpers: HelperId[]; pid: string }>('/api/helper', { helper: id, ...(archiveDay ? { day: archiveDay } : {}) });
+      const r = await api<{ helpers: HelperId[]; pid: string; name: string | null }>('/api/helper', { helper: id, ...(archiveDay ? { day: archiveDay } : {}) });
       savePid(r.pid);
+      if (r.name) setName(r.name);
       setPlay((p) => ({ ...p, helpers: r.helpers }));
       track('helper_used', { helper: id });
       setHelpersOpen(false);
@@ -578,15 +577,15 @@ export default function Game() {
         <NameDialog
           voyage={isVoyage}
           initial={name ?? ''}
-          onDone={(n) => { setName(n); setNameOpen(false); if (pendingFire.current) { pendingFire.current = false; setStatus({ text: `Welcome aboard, ${n}. Press Fire when ready.` }); } }}
-          onSkip={() => { setNameOpen(false); pendingFire.current = false; }}
+          onDone={(n) => { setName(n); setNameOpen(false); }}
+          onSkip={() => setNameOpen(false)}
         />
       )}
       {resultOpen && level && isVoyage && voy && play.status === 'won' && (
         <VoyageResult n={voy.n} stars={play.score} total={Object.values(voy.stars).reduce((a, b) => a + b, 0)} named={!!name}
           onJoin={() => { setResultOpen(false); setNameOpen(true); }} onBoard={() => { setResultOpen(false); setBoardOpen(true); }} onNext={() => go({ kind: 'voyage', n: voy.n + 1 })} onReplay={retryVoyage} onLevels={() => { setResultOpen(false); setMoreOpen('voyage'); }} onClose={() => setResultOpen(false)} />
       )}
-      {resultOpen && level && !isVoyage && <ResultCard level={level} play={play} streak={streak} practice={practice} archive={!!archiveDay} onPractice={startPractice} onMore={() => { setResultOpen(false); setMoreOpen(archiveDay ? 'archive' : 'voyage'); }} onClose={() => setResultOpen(false)} onBoard={() => { setResultOpen(false); setBoardOpen(true); }} />}
+      {resultOpen && level && !isVoyage && <ResultCard level={level} play={play} streak={streak} practice={practice} archive={!!archiveDay} name={name} onRename={() => { setResultOpen(false); setNameOpen(true); }} onPractice={startPractice} onMore={() => { setResultOpen(false); setMoreOpen(archiveDay ? 'archive' : 'voyage'); }} onClose={() => setResultOpen(false)} onBoard={() => { setResultOpen(false); setBoardOpen(true); }} />}
       {boardOpen && <Leaderboard puzzleNumber={ranked ? level?.number ?? 1 : undefined} initial={isVoyage ? 'voyage' : 'all'}
         onJoin={name ? undefined : () => { setBoardOpen(false); setNameOpen(true); }} onClose={() => setBoardOpen(false)} />}
       {moreOpen && mode && <MorePuzzles initial={moreOpen} mode={mode} onGo={go} onClose={() => setMoreOpen(null)} />}
@@ -608,8 +607,9 @@ function NameDialog({ initial, voyage, onDone, onSkip }: { initial: string; voya
   return (
     <div className="overlay">
       <form className="card" onSubmit={submit} aria-labelledby="introTitle">
-        <h2 id="introTitle">{voyage ? 'Join the leaderboard' : 'One puzzle a day'}</h2>
-        {voyage ? <p>Pick a pilot name to put your Voyage stars on the leaderboard. Stars you already earned count too.</p> : <ol>
+        <h2 id="introTitle">{initial ? 'Your pilot name' : voyage ? 'Join the leaderboard' : 'One puzzle a day'}</h2>
+        {initial ? <p>You are on the leaderboard as <b>{initial}</b>. Pick a name of your own; your points and streak stay with you.</p>
+          : voyage ? <p>Pick a pilot name to put your Voyage stars on the leaderboard. Stars you already earned count too.</p> : <ol>
           <li><b>Drag the moon</b> and <b>turn its mirror</b> so the laser bounces into the green beacon.</li>
           <li>Light bends near planets. The dashed line only shows the start of the beam.</li>
           <li>You get <b>3 shots</b>: a hit scores 1,000, 700 or 400. Helpers cost points.</li>
@@ -622,8 +622,8 @@ function NameDialog({ initial, voyage, onDone, onSkip }: { initial: string; voya
         </div>
         {error && <p className="err">{error}</p>}
         <div className="row">
-          <button type="button" className="btn" onClick={onSkip}>{voyage ? 'Not now' : 'Look around first'}</button>
-          <button type="submit" className="btn primary" disabled={saving || value.trim().length < 2}>{saving ? 'Saving…' : 'Start playing'}</button>
+          <button type="button" className="btn" onClick={onSkip}>{initial || voyage ? 'Not now' : 'Look around first'}</button>
+          <button type="submit" className="btn primary" disabled={saving || value.trim().length < 2}>{saving ? 'Saving…' : initial ? 'Save name' : 'Start playing'}</button>
         </div>
       </form>
     </div>
@@ -638,7 +638,7 @@ function Countdown() {
   return <b>{pad(Math.floor(s / 3600))}:{pad(Math.floor((s % 3600) / 60))}:{pad(s % 60)}</b>;
 }
 
-function ResultCard({ level, play, streak, practice, archive, onPractice, onMore, onClose, onBoard }: { level: Level; play: Play; streak: Streak; practice: boolean; archive: boolean; onPractice: () => void; onMore: () => void; onClose: () => void; onBoard: () => void }) {
+function ResultCard({ level, play, streak, practice, archive, name, onRename, onPractice, onMore, onClose, onBoard }: { level: Level; play: Play; streak: Streak; practice: boolean; archive: boolean; name: string | null; onRename: () => void; onPractice: () => void; onMore: () => void; onClose: () => void; onBoard: () => void }) {
   const text = shareText({ number: level.number, shots: play.shots, score: play.score, helpers: play.helpers, streak: streak.current, archive });
   const [copied, setCopied] = useState('Copy result');
   const shareRef = useRef<HTMLDivElement>(null);
@@ -672,6 +672,12 @@ function ResultCard({ level, play, streak, practice, archive, onPractice, onMore
             <span><b>{rank?.all ? `#${rank.all}` : '–'}</b>all time</span>
           </>}
         </div>
+        {!archive && name && (
+          <div className="row">
+            <p style={{ flex: 1 }}>On the leaderboard as <b>{name}</b>.</p>
+            <button className="btn" onClick={onRename}>Change name</button>
+          </div>
+        )}
         <div className="share" ref={shareRef}>{text}</div>
         <div className="row">
           <button className="btn primary" onClick={copy}>{copied}</button>
