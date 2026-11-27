@@ -3,8 +3,10 @@
 // without it every call here does nothing and posthog-js is never downloaded.
 //
 // No cookies or browser storage are added for tracking: PostHog keeps its state in memory only.
-// A returning player is recognised by the anonymous player id the game already keeps for itself
-// (see pid.ts), which is used as the PostHog distinct id.
+// A returning player is recognised through the anonymous player id the game already keeps for
+// itself (see pid.ts). That id is the player's credential (the server accepts it in a header), so
+// it never leaves the site: PostHog gets a one-way SHA-256 hash of it instead, which is the same
+// on every visit.
 import type { PostHog, Properties } from 'posthog-js';
 
 const KEY = process.env.NEXT_PUBLIC_POSTHOG_KEY?.trim() || null;
@@ -17,6 +19,17 @@ let started = false;
 // calls made before posthog-js has loaded, replayed once it has
 let pending: ((p: PostHog) => void)[] = [];
 
+const ID_PREFIX = 'orbit-posthog-v1:';
+/** The PostHog distinct id for a player: hex SHA-256 of a fixed prefix and the player id. */
+export async function analyticsId(pid: string): Promise<string | null> {
+  try {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(ID_PREFIX + pid));
+    return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return null; // no Web Crypto (insecure context): stay anonymous rather than send the raw id
+  }
+}
+
 function run(fn: (p: PostHog) => void) {
   if (!KEY || typeof window === 'undefined') return;
   if (ph) fn(ph);
@@ -27,7 +40,7 @@ function run(fn: (p: PostHog) => void) {
 export function initAnalytics(pid: string | null) {
   if (!KEY || started || typeof window === 'undefined') return;
   started = true;
-  import('posthog-js').then(({ default: posthog }) => {
+  Promise.all([import('posthog-js'), pid ? analyticsId(pid) : null]).then(([{ default: posthog }, id]) => {
     posthog.init(KEY, {
       api_host: HOST,
       persistence: 'memory',
@@ -41,7 +54,7 @@ export function initAnalytics(pid: string | null) {
       capture_pageview: 'history_change', // the game changes the address for past days and Voyage levels
       capture_pageleave: true, // with page views, this measures time on the page
       person_profiles: 'identified_only',
-      ...(pid ? { bootstrap: { distinctID: pid, isIdentifiedID: true } } : {}),
+      ...(id ? { bootstrap: { distinctID: id, isIdentifiedID: true } } : {}),
       // set on every event, including the first page view sent during init
       before_send: (e) => (e ? { ...e, properties: { ...e.properties, app: APP } } : e),
     });
@@ -57,9 +70,10 @@ export function capture(event: AnalyticsEvent, props: Properties = {}) {
   run((p) => p.capture(event, props));
 }
 
-/** Ties this visitor to the game's own player id, so later visits count as the same person. */
+/** Ties this visitor to (a hash of) the game's own player id, so later visits count as the same person. */
 export function identifyPlayer(pid: string) {
-  run((p) => { if (p.get_distinct_id() !== pid) p.identify(pid); });
+  if (!KEY || typeof window === 'undefined') return;
+  analyticsId(pid).then((id) => { if (id) run((p) => { if (p.get_distinct_id() !== id) p.identify(id); }); });
 }
 
 export type AnalyticsEvent =
