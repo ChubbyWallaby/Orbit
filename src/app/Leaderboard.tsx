@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import type { BoardEntry } from '@/server/store';
+import { capture } from './analytics';
 import { pidHeaders } from './pid';
 
 type Scope = 'all' | 'day' | 'voyage';
@@ -13,6 +14,7 @@ export default function Leaderboard({ onClose, puzzleNumber, initial = 'all', on
 
   useEffect(() => {
     let live = true;
+    capture('leaderboard_viewed', { scope });
     fetch(`/api/leaderboard?scope=${scope}`, { headers: pidHeaders() })
       .then(async (r) => { const j = await r.json(); if (!r.ok) throw new Error(j.error); return j; })
       .then((j) => live && setBoard(j))

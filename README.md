@@ -77,3 +77,12 @@ Inside another site's iframe the player cookie is third-party, so in production 
 Set `ORBIT_SEED_SECRET` to a long random string (for example `openssl rand -hex 32`) in the Vercel project's environment variables, and keep it private. The level generator is in this public repository, so without the secret anyone could run it for any day and read the solution. Changing or removing the secret changes every board that is not already cached, so set it once and leave it.
 
 Deploy to Vercel and add the **Upstash Redis** integration from the Vercel Marketplace. It sets `KV_REST_API_URL` and `KV_REST_API_TOKEN`, which the app picks up automatically. In production the app refuses to start the leaderboard without them, rather than silently losing scores.
+
+## Analytics
+
+Product analytics go to PostHog when `NEXT_PUBLIC_POSTHOG_KEY` (the project API key) is set at build time; `NEXT_PUBLIC_POSTHOG_HOST` sets the host (default `https://us.i.posthog.com`, use `https://eu.i.posthog.com` for an EU project). Without the key, posthog-js is never downloaded and nothing is sent.
+
+- Every event carries `app: "orbit"`, since the PostHog project is shared with other apps. Filter on it.
+- PostHog keeps its state in memory only: no cookies, no localStorage. A visitor is identified by the anonymous player id the game already keeps for itself (`orbit:pid` / the `orbit_pid` cookie), so a returning player counts as the same person.
+- Page views (including the address changes for past days and Voyage levels) and page leave are captured, for time on site. Session recording is off; autocapture only records clicks on buttons and links, never text typed into a field.
+- Game events: `puzzle_viewed`, `first_shot`, `shot` (`attempt`), `puzzle_finished` (`attempts`, `time_taken_s`, `result`, `score` or `stars`), `name_set`, `result_shared`, `leaderboard_viewed`, `helper_used`, `practice_started`. Each has `mode`: `daily`, `archive` or `voyage`.
