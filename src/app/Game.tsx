@@ -5,10 +5,10 @@ import { HELPER_ORDER, HELPERS, MAX_SHOTS, msUntilNextPuzzle, scoreFor, shareTex
 import type { OrbitScene } from '@/game/scene';
 import type { TodayPayload, VoyageInfo, VoyagePayload } from '@/server/game';
 import type { Play, Streak } from '@/server/store';
-import { track } from '@vercel/analytics';
+import { capture, initAnalytics } from './analytics';
 import Leaderboard from './Leaderboard';
 import MorePuzzles, { starText, type Mode } from './MorePuzzles';
-import { pidHeaders, savePid } from './pid';
+import { pidHeaders, savePid, storedPid } from './pid';
 import { pixelFirstPuzzleFinished, pixelPageView } from './pixel';
 
 type Status = { text: string; kind?: 'good' | 'bad' };
@@ -152,6 +152,8 @@ export default function Game() {
   const moves = useRef(0);
   const dayRef = useRef<string | null>(null);
   const clockOffset = useRef(0);
+  // when the puzzle on screen was opened (or a Voyage attempt restarted), for the time taken to finish
+  const viewedAt = useRef(0);
   const countMove = useCallback(() => {
     moves.current++;
     if (dayRef.current) try { localStorage.setItem(movesKey(dayRef.current), String(moves.current)); } catch { /* ignore */ }
@@ -176,6 +178,9 @@ export default function Game() {
   const energized = helpers.includes('energized');
   const scanner = helpers.includes('scanner') || !!(isVoyage && voy?.info.scanner);
   const destroyed = useMemo(() => [...play.destroyed, ...practiceDestroyed], [play.destroyed, practiceDestroyed]);
+
+  // analytics (does nothing unless NEXT_PUBLIC_POSTHOG_KEY is set)
+  useEffect(() => { initAnalytics(storedPid()); }, []);
 
   // create the 3D scene once
   useEffect(() => {
@@ -224,6 +229,13 @@ export default function Game() {
       // keep the moons where the last shot of a finished day found them
       if (p0.status !== 'playing') setHeldT(t ?? 0);
       setPlacement(p);
+      viewedAt.current = Date.now();
+      capture('puzzle_viewed', {
+        mode: mode.kind,
+        ...(mode.kind === 'voyage' ? { level: Number(shownKey.split(':')[1]) } : { day: lvl.day, number: lvl.number }),
+        shots_used: p0.shots.length,
+        already_finished: p0.status !== 'playing',
+      });
     };
     if (mode.kind === 'voyage') {
       const load = (n?: number): Promise<void> => api<VoyagePayload>(`/api/voyage${n ? `?n=${n}` : ''}`).then((v) => {
@@ -341,8 +353,11 @@ export default function Game() {
       // with a beam splitter, one beam can destroy an asteroid while the other goes elsewhere
       else if (res.destroyed.length) setStatus({ text: `Asteroid destroyed! The way is clearer for your next shot.${tail}`, kind: 'bad' });
       else setStatus({ text: `${missText(level, { ...res, rays: traced.rays })}${tail}`, kind: 'bad' });
+      const shotProps = { mode: archiveDay ? 'archive' : 'daily', number: level.number, attempt: res.play.shots.length, result: res.result, helpers: res.play.helpers.length };
+      if (shotProps.attempt === 1) capture('first_shot', shotProps);
+      capture('shot', shotProps);
       if (res.status !== 'playing') {
-        track(archiveDay ? 'archive_finished' : 'finished', { result: res.status, shots: res.play.shots.length, helpers: res.play.helpers.length, score: res.score });
+        capture('puzzle_finished', { mode: shotProps.mode, number: level.number, result: res.status, attempts: shotProps.attempt, score: res.score, helpers: shotProps.helpers, time_taken_s: Math.round((Date.now() - viewedAt.current) / 1000) });
         pixelFirstPuzzleFinished(archiveDay ? 'archive' : 'daily');
         if (res.status === 'lost') setStatus({ text: archiveDay ? 'Out of shots. The beacon stays dark on this day.' : 'Out of shots. The beacon stays dark today.', kind: 'bad' });
         setTimeout(() => setResultOpen(true), 900);
@@ -375,13 +390,15 @@ export default function Game() {
       setPlay({ ...freshPlay(), shots: res.shots, status: res.status, score: res.stars });
       setVoy({ ...voy, unlocked: res.unlocked, stars: res.starsByLevel });
       const left = MAX_SHOTS - res.shots.length;
+      const shotProps = { mode: 'voyage', level: voy.n, attempt: res.shots.length, result: res.result };
+      if (shotProps.attempt === 1) capture('first_shot', shotProps);
+      capture('shot', shotProps);
+      if (res.status !== 'playing') capture('puzzle_finished', { mode: 'voyage', level: voy.n, result: res.status, attempts: res.shots.length, stars: res.stars, time_taken_s: Math.round((Date.now() - viewedAt.current) / 1000) });
       if (res.status === 'won') {
-        track('voyage_cleared', { level: voy.n, stars: res.stars });
         pixelFirstPuzzleFinished('voyage');
         setStatus({ text: `Level ${voy.n} cleared! ${starText(res.stars)}`, kind: 'good' });
         setTimeout(() => setResultOpen(true), 900);
       } else if (res.status === 'lost') {
-        track('voyage_failed', { level: voy.n });
         setStatus({ text: `${missText(level, { ...res, rays: traced.rays })} Out of shots. Try again: the level stays the same.`, kind: 'bad' });
       } else setStatus({ text: `${missText(level, { ...res, rays: traced.rays })} ${left} ${left === 1 ? 'shot' : 'shots'} left.`, kind: 'bad' });
     } catch (e) {
@@ -396,6 +413,7 @@ export default function Game() {
   const retryVoyage = () => {
     setResultOpen(false);
     setPlay(freshPlay());
+    viewedAt.current = Date.now();
     beamFor.current = null; setHeldT(null);
     sceneRef.current?.clearBeam();
     setStatus({ text: voy ? `Level ${voy.n}: three fresh shots.` : START_TEXT });
@@ -421,7 +439,7 @@ export default function Game() {
   };
 
   const startPractice = () => {
-    track('practice_started');
+    capture('practice_started', { mode: archiveDay ? 'archive' : 'daily' });
     setResultOpen(false);
     setPractice(true);
     setStatus({ text: 'Practice mode: fire as often as you like. These shots don’t count toward the leaderboard.' });
@@ -442,7 +460,7 @@ export default function Game() {
       savePid(r.pid);
       if (r.name) setName(r.name);
       setPlay((p) => ({ ...p, helpers: r.helpers }));
-      track('helper_used', { helper: id });
+      capture('helper_used', { helper: id, mode: archiveDay ? 'archive' : 'daily' });
       setHelpersOpen(false);
       if (id === 'satellite') {
         const pos = constrainMoon(level, { x: placement.moon.x + 6, z: placement.moon.z }, SATELLITE_RADIUS);
@@ -577,7 +595,7 @@ export default function Game() {
         <NameDialog
           voyage={isVoyage}
           initial={name ?? ''}
-          onDone={(n) => { setName(n); setNameOpen(false); }}
+          onDone={(n) => { capture('name_set', { mode: isVoyage ? 'voyage' : archiveDay ? 'archive' : 'daily', renamed: !!name }); setName(n); setNameOpen(false); }}
           onSkip={() => setNameOpen(false)}
         />
       )}
@@ -650,7 +668,7 @@ function ResultCard({ level, play, streak, practice, archive, name, onRename, on
       .catch(() => setRank(null));
   }, [archive]);
   const copy = () => {
-    track('shared', { result: play.status, archive });
+    capture('result_shared', { mode: archive ? 'archive' : 'daily', number: level.number, result: play.status });
     navigator.clipboard.writeText(text).then(() => { setCopied('Copied'); setTimeout(() => setCopied('Copy result'), 1600); }, () => {
       const r = document.createRange(); r.selectNodeContents(shareRef.current!); const s = getSelection()!; s.removeAllRanges(); s.addRange(r);
       setCopied('Press Ctrl+C');
@@ -694,7 +712,7 @@ function ResultCard({ level, play, streak, practice, archive, name, onRename, on
 function VoyageResult({ n, stars, total, named, onJoin, onBoard, onNext, onReplay, onLevels, onClose }: { n: number; stars: number; total: number; named: boolean; onJoin: () => void; onBoard: () => void; onNext: () => void; onReplay: () => void; onLevels: () => void; onClose: () => void }) {
   const [copied, setCopied] = useState('Copy result');
   const copy = () => {
-    track('shared', { result: 'voyage' });
+    capture('result_shared', { mode: 'voyage', level: n, stars });
     navigator.clipboard.writeText(voyageShareText(n, stars)).then(() => { setCopied('Copied'); setTimeout(() => setCopied('Copy result'), 1600); }, () => setCopied('Could not copy'));
   };
   return (
