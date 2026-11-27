@@ -9,6 +9,7 @@ import { track } from '@vercel/analytics';
 import Leaderboard from './Leaderboard';
 import MorePuzzles, { starText, type Mode } from './MorePuzzles';
 import { pidHeaders, savePid } from './pid';
+import { pixelFirstPuzzleFinished, pixelPageView } from './pixel';
 
 type Status = { text: string; kind?: 'good' | 'bad' };
 
@@ -198,6 +199,7 @@ export default function Game() {
     setMoreOpen(null); setResultOpen(false);
     history.pushState(null, '', urlFor(m));
     dispatchEvent(new Event(NAVIGATE));
+    pixelPageView();
   }, []);
 
   // load the puzzle for the current mode
@@ -341,6 +343,7 @@ export default function Game() {
       else setStatus({ text: `${missText(level, { ...res, rays: traced.rays })}${tail}`, kind: 'bad' });
       if (res.status !== 'playing') {
         track(archiveDay ? 'archive_finished' : 'finished', { result: res.status, shots: res.play.shots.length, helpers: res.play.helpers.length, score: res.score });
+        pixelFirstPuzzleFinished(archiveDay ? 'archive' : 'daily');
         if (res.status === 'lost') setStatus({ text: archiveDay ? 'Out of shots. The beacon stays dark on this day.' : 'Out of shots. The beacon stays dark today.', kind: 'bad' });
         setTimeout(() => setResultOpen(true), 900);
       }
@@ -375,6 +378,7 @@ export default function Game() {
       const left = MAX_SHOTS - res.shots.length;
       if (res.status === 'won') {
         track('voyage_cleared', { level: voy.n, stars: res.stars });
+        pixelFirstPuzzleFinished('voyage');
         setStatus({ text: `Level ${voy.n} cleared! ${starText(res.stars)}`, kind: 'good' });
         setTimeout(() => setResultOpen(true), 900);
       } else if (res.status === 'lost') {
