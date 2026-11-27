@@ -2,6 +2,8 @@ import type { Metadata, Viewport } from 'next';
 import { IBM_Plex_Mono, IBM_Plex_Sans, Syne } from 'next/font/google';
 import { Analytics } from '@vercel/analytics/next';
 import { SITE_URL } from '@/game/rules';
+import MetaPixel from './MetaPixel';
+import { PIXEL_ID } from './pixel';
 import './globals.css';
 
 const display = Syne({ subsets: ['latin'], weight: ['600', '800'], variable: '--font-display' });
@@ -26,6 +28,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         {children}
         <Analytics />
+        {PIXEL_ID && <MetaPixel id={PIXEL_ID} />}
       </body>
     </html>
   );
