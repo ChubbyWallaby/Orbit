@@ -65,8 +65,12 @@ Without Redis credentials the app uses an in-memory store that resets when the s
 To play a different day's puzzle while testing, set `ORBIT_DAY`, for example `ORBIT_DAY=2026-11-14 npm run dev`. This is ignored in production.
 
 ```bash
-npm test
+npm test             # unit tests only
+npm run verify       # type check, lint, unit tests, production build and browser checks
+npm run verify:live  # read-only smoke checks against the live site
 ```
+
+[VERIFY.md](VERIFY.md) lists every check, what it proves and what it does not cover.
 
 ## Embedding on game portals
 

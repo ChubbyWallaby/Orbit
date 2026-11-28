@@ -6,7 +6,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "verify": "node scripts/verify/run.mjs",
+    "verify:e2e": "node scripts/verify/run.mjs --e2e",
+    "verify:live": "node scripts/verify/live.mjs"
   },
   "dependencies": {
     "@upstash/redis": "^1.41.0",
