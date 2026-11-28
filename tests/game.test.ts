@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { bodiesAt, constrainMoon, orbitClock, previewLimit, trace, withDestroyed, type Level } from '@/game/engine';
 import { generateLevel, featuresFor, FALLBACK_LEVEL, ORBIT_PERIOD } from '@/game/generate';
-import { scoreFor, puzzleNumber, shareText, msUntilNextPuzzle, missText } from '@/game/rules';
+import { scoreFor, puzzleNumber, shareText, shareUrl, voyageShareText, SITE_URL, msUntilNextPuzzle, missText } from '@/game/rules';
 import { MemoryStore, getStore as getStoreForTest, setStoreForTests, nextStreak, liveStreak, rankEntries, windowStart } from '@/server/store';
 import { isJsonRequest, pickPid, pidCookieOptions } from '@/server/pid';
 import { autoName, cleanName, parsePlacement, leaderboard, levelFor, setName, shoot, today, applyHelper, archive, checkClock, resolveDay, voyage, voyageShot, voyageLevelFor, GameError, VOYAGE_MIN_SOLVE_MS, CLOCK_SLACK, MIN_SOLVE_MS } from '@/server/game';
@@ -27,7 +27,21 @@ describe('rules', () => {
     expect(msUntilNextPuzzle(new Date('2026-11-10T23:00:00Z'))).toBe(3600000);
   });
   test('share text', () => {
-    expect(shareText({ number: 4, shots: ['rock', 'hit'], score: 550, helpers: ['scanner'] })).toBe('ORBIT #4 🪐\n🟥🟩⬛  550 pts\nhelpers 📡\norbitpuzzle.com');
+    expect(shareText({ number: 4, shots: ['rock', 'hit'], score: 550, helpers: ['scanner'] })).toBe('ORBIT #4 🪐\n🟥🟩⬛  550 pts\nhelpers 📡\nhttps://orbitpuzzle.com/?ref=share');
+    // an archive result links to that day, and shows no streak
+    expect(shareText({ number: 2, shots: ['rock', 'rock', 'rock'], score: 0, helpers: [], streak: 5, archive: true, day: '2026-11-11' }))
+      .toBe('ORBIT #2 🪐 (archive)\n🟥🟥🟥  beacon dark\nno helpers\nhttps://orbitpuzzle.com/?ref=share&day=2026-11-11');
+    expect(voyageShareText(12, 2)).toBe('ORBIT Voyage · level 12 🚀\n★★☆\nhttps://orbitpuzzle.com/?ref=share&voyage=12');
+  });
+
+  test('share links are tagged ref=share and open the same puzzle', () => {
+    expect(shareUrl({ kind: 'daily' })).toBe('https://orbitpuzzle.com/?ref=share');
+    expect(shareUrl({ kind: 'archive', day: '2026-11-20' })).toBe('https://orbitpuzzle.com/?ref=share&day=2026-11-20');
+    expect(shareUrl({ kind: 'voyage', n: 7 })).toBe('https://orbitpuzzle.com/?ref=share&voyage=7');
+    // the public domain the rest of the site uses (link previews, metadata)
+    for (const u of [shareUrl({ kind: 'daily' }), shareUrl({ kind: 'voyage', n: 1 })]) expect(new URL(u).origin).toBe(SITE_URL);
+    const q = new URL(shareUrl({ kind: 'archive', day: '2026-11-20' })).searchParams;
+    expect([q.get('ref'), q.get('day'), q.get('voyage')]).toEqual(['share', '2026-11-20', null]);
   });
 });
 
