@@ -28,7 +28,8 @@ let browser;
 
 /**
  * Stands in for the phone's share sheet. `none`: the browser has none (as desktop Chrome);
- * `ok`: sharing works; `abort`: the pilot closes the sheet. Calls land in window.__shares,
+ * `ok`: sharing works; `abort`: the pilot closes the sheet; `hold`: the sheet stays open until
+ * window.__release() is called. As in real browsers, a call while a sheet is open is refused. Calls land in window.__shares,
  * clipboard writes in window.__copies. window.__shareMode can be changed later.
  */
 function shareSheet(mode) {
@@ -37,7 +38,13 @@ function shareSheet(mode) {
     configurable: true,
     value: mode === 'none' ? undefined : async function share(data) {
       window.__shares.push(JSON.parse(JSON.stringify(data)));
+      if (window.__sharePending) throw new DOMException('An earlier share has not yet completed.', 'InvalidStateError');
       if (window.__shareMode === 'abort') throw new DOMException('Share canceled', 'AbortError');
+      if (window.__shareMode === 'hold') {
+        window.__sharePending = true;
+        await new Promise((res) => { window.__release = res; });
+        window.__sharePending = false;
+      }
     },
   });
   const c = navigator.clipboard;
@@ -210,6 +217,21 @@ async function archiveFlow() {
     assert(!copies.length, 'the clipboard was written as well as the share sheet');
     assert(!errors.length, 'page error: ' + errors[0]);
   });
+
+  await r.check('share: a double tap opens one share sheet and copies nothing', async () => {
+    assert(shot, 'needs the archive result');
+    const before = (await shares(page)).shares.length;
+    await page.evaluate(() => { window.__shareMode = 'hold'; });
+    const btn = page.locator('.card').getByRole('button', { name: 'Share', exact: true });
+    await btn.dblclick();
+    await page.waitForTimeout(500);
+    const held = await shares(page);
+    await page.evaluate(() => window.__release?.());
+    await page.waitForTimeout(300);
+    assert(held.shares.length - before === 1, `a double tap opened the share sheet ${held.shares.length - before} times`);
+    assert(!(await shares(page)).copies.length, 'a double tap fell back to the clipboard');
+    assert(!errors.length, 'page error: ' + errors[0]);
+  });
   await ctx.close();
 }
 
@@ -271,53 +293,102 @@ function decodeBody(buf) {
 }
 
 async function analyticsOn(mockLog) {
-  await r.check('with a fake PostHog key, the raw player id never reaches the analytics host', async () => {
-    const { ctx, page } = await visitor(APP_PH, { share: 'abort' });
-    const toMock = [];
-    ctx.on('request', async (req) => {
-      if (new URL(req.url()).host !== MOCK_HOST) return;
-      toMock.push({ url: req.url(), headers: await req.allHeaders().catch(() => req.headers()), body: decodeBody(req.postDataBuffer()) });
-    });
+  const { ctx, page } = await visitor(APP_PH, { share: 'abort' });
+  const toMock = [];
+  ctx.on('request', async (req) => {
+    if (new URL(req.url()).host !== MOCK_HOST) return;
+    toMock.push({ url: req.url(), headers: await req.allHeaders().catch(() => req.headers()), body: decodeBody(req.postDataBuffer()) });
+  });
+  const typed = 'Typed' + crypto.randomInt(1e6, 1e7);
+  let pid = null, events = [], logged = [], played = false;
+  const readMock = () => {
+    logged = fs.readFileSync(mockLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    events = [];
+    for (const l of logged) try { const j = JSON.parse(l.body); for (const e of Array.isArray(j) ? j : j.batch ?? [j]) if (e?.event) events.push(e); } catch { /* not an event batch */ }
+  };
+  const hashed = () => crypto.createHash('sha256').update('orbit-posthog-v1:' + pid).digest('hex');
+
+  await r.check('analytics build: a full visit plays through (game, rename, leaderboard, leave, return)', async () => {
     await openPuzzle(page, '/', 'Daily #');
     await playToEnd(page);
     await page.locator('#resTitle').waitFor({ timeout: 15000 });
-    // a closed sheet, then a real share: result_shared once
+    // a closed share sheet, then a double tap on Share: result_shared must be sent once
     const shareBtn = page.locator('.card').getByRole('button', { name: 'Share', exact: true });
     await shareBtn.click();
     await page.waitForTimeout(300);
-    await page.evaluate(() => { window.__shareMode = 'ok'; });
-    await shareBtn.click();
-    await page.waitForFunction(() => window.__shares.length === 2, null, { timeout: 5000 });
-    await page.locator('.card').getByRole('button', { name: 'Leaderboard' }).click();
+    await page.evaluate(() => { window.__shareMode = 'hold'; });
+    await shareBtn.dblclick();
+    await page.waitForTimeout(300);
+    await page.evaluate(() => window.__release?.());
+    await page.waitForTimeout(300);
+    // rename from the result card, typing into the name field (autocapture must not record it)
+    await page.locator('.card').getByRole('button', { name: 'Change name' }).click();
+    await page.locator('#pilot').fill(typed);
+    await page.getByRole('button', { name: 'Save name' }).click();
+    await page.locator('#pilot').waitFor({ state: 'detached' });
+    await page.getByRole('button', { name: 'Leaderboard', exact: true }).click();
+    await page.locator('#lbTitle').waitFor();
     await page.getByRole('button', { name: 'Close' }).click();
-    await page.evaluate(() => dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false })));
-    await page.waitForTimeout(2500); // PostHog sends in batches
-    const pid = await page.evaluate(() => localStorage.getItem('orbit:pid'));
+    pid = await page.evaluate(() => localStorage.getItem('orbit:pid'));
     assert(pid && /^[0-9a-f-]{36}$/.test(pid), 'no player id kept by the page');
-    const logged = fs.readFileSync(mockLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    // the page leave PostHog sends on pagehide (a real navigation does not deliver it in headless Chromium)
+    await page.evaluate(() => dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false })));
+    await page.waitForTimeout(1500);
+    // a returning visit in the same browser
+    const again = await ctx.newPage();
+    await again.goto('/');
+    await again.locator('.meta', { hasText: 'Daily #' }).first().waitFor({ timeout: 30000 });
+    await again.waitForTimeout(2500); // PostHog sends in batches
+    readMock();
     // control: the events really went out, and the check can read them
-    assert(toMock.length > 0 && logged.length > 0, 'no request reached the analytics host at all, so the check proves nothing');
-    const events = [];
-    for (const l of logged) try { const j = JSON.parse(l.body); for (const e of Array.isArray(j) ? j : j.batch ?? [j]) if (e?.event) events.push(e); } catch { /* not an event batch */ }
-    const names = new Set(events.map((e) => e.event));
-    for (const want of ['$pageview', 'puzzle_viewed', 'first_shot', 'puzzle_finished']) assert(names.has(want), `the analytics host never got ${want} (got ${[...names].join(', ')})`);
+    assert(toMock.length > 0 && events.length > 0, 'no event reached the analytics host at all, so the analytics checks prove nothing');
+    played = true;
+  });
+
+  await r.check('with a fake PostHog key, the raw player id never reaches the analytics host', async () => {
+    assert(played, 'needs the full visit');
     const leaks = [
       ...toMock.filter((x) => (x.url + JSON.stringify(x.headers) + x.body).includes(pid)).map((x) => 'browser request ' + new URL(x.url).pathname),
       ...logged.filter((l) => JSON.stringify(l).includes(pid)).map((l) => 'received ' + l.path),
     ];
     assert(!leaks.length, `the raw player id was sent to the analytics host: ${leaks[0]}`);
-    const hashed = crypto.createHash('sha256').update('orbit-posthog-v1:' + pid).digest('hex');
-    const game = events.filter((e) => ['first_shot', 'shot', 'puzzle_finished'].includes(e.event));
-    assert(game.length && game.every((e) => (e.properties?.distinct_id ?? e.distinct_id) === hashed), 'game events are not identified by the hashed player id');
-    assert(events.every((e) => e.properties?.app === 'orbit'), 'an event without app=orbit');
+    const game = events.filter((e) => ['first_shot', 'shot', 'puzzle_finished', 'name_set', 'leaderboard_viewed'].includes(e.event));
+    assert(game.length && game.every((e) => (e.properties?.distinct_id ?? e.distinct_id) === hashed()), 'game events are not identified by the hashed player id');
+  });
+
+  await r.check('analytics: every game event arrives with app=orbit and the right details', async () => {
+    assert(played, 'needs the full visit');
+    const names = events.map((e) => e.event);
+    for (const want of ['$pageview', 'puzzle_viewed', 'first_shot', 'shot', 'puzzle_finished', 'result_shared', 'name_set', 'leaderboard_viewed', '$pageleave']) assert(names.includes(want), `the analytics host never got ${want} (got ${[...new Set(names)].join(', ')})`);
+    const noApp = events.filter((e) => e.properties?.app !== 'orbit');
+    assert(!noApp.length, 'events without app=orbit: ' + noApp.map((e) => e.event).join(', '));
+    const shots = events.filter((e) => e.event === 'shot').map((e) => e.properties.attempt);
+    assert(shots.join() === '1,2,3', `shot attempts were ${shots.join() || 'none'}, not 1,2,3`);
+    const fin = events.find((e) => e.event === 'puzzle_finished').properties;
+    assert(fin.attempts === 3 && fin.mode === 'daily' && fin.result === 'lost' && typeof fin.time_taken_s === 'number', `puzzle_finished props ${JSON.stringify({ attempts: fin.attempts, mode: fin.mode, result: fin.result, time_taken_s: fin.time_taken_s })}`);
+    assert(events.find((e) => e.event === 'name_set').properties.renamed === true, 'name_set does not say it was a rename of the generated name');
     const shared = events.filter((e) => e.event === 'result_shared');
-    assert(shared.length === 1 && shared[0].properties.method === 'share', `expected one result_shared (method share) for a closed sheet and a share, got ${shared.length}`);
+    assert(shared.length === 1 && shared[0].properties.method === 'share', `a closed sheet and a double-tapped share sent ${shared.length} result_shared (${shared.map((e) => e.properties.method).join(', ')}), not one with method share`);
+  });
+
+  await r.check('analytics: a returning visit is recognised by the same hashed id', async () => {
+    assert(played, 'needs the full visit');
+    const views = events.filter((e) => e.event === '$pageview');
+    assert(views.length >= 2, `expected a page view for each visit, got ${views.length}`);
+    const id = views.at(-1).properties?.distinct_id ?? views.at(-1).distinct_id;
+    assert(id === hashed(), `the second visit's page view has distinct id ${String(id).slice(0, 16)}…, not the hashed player id`);
+  });
+
+  await r.check('analytics: a typed pilot name is never sent, and nothing else is stored', async () => {
+    assert(played, 'needs the full visit');
+    const withName = logged.filter((l) => JSON.stringify(l).includes(typed));
+    assert(!withName.length, `the typed name reached the analytics host (${withName.map((l) => l.path).join(', ')})`);
     const cookies = (await ctx.cookies()).map((c) => c.name);
     assert(cookies.every((c) => c === 'orbit_pid'), 'a cookie other than orbit_pid was set: ' + cookies.join(', '));
     const keys = await page.evaluate(() => [...Object.keys(localStorage), ...Object.keys(sessionStorage)]);
     assert(keys.every((k) => k.startsWith('orbit:')), 'non-game browser storage used: ' + keys.filter((k) => !k.startsWith('orbit:')).join(', '));
-    await ctx.close();
   });
+  await ctx.close();
 }
 
 // ---- run ----
@@ -334,9 +405,14 @@ async function main() {
   const next = path.join(ROOT, 'node_modules/.bin/next');
   try {
     servers.push(await startServer('mock PostHog', process.execPath, [path.join(import.meta.dirname, 'mock-posthog.mjs'), mockLog, String(MOCK_PORT)], { env: cleanEnv(), url: `http://${MOCK_HOST}/ping` }));
-    servers.push(await startServer('app (no analytics key)', next, ['start', '-p', String(PORT)], { env: cleanEnv(), url: APP + '/api/leaderboard' }));
-    servers.push(await startServer('app (fake analytics key)', next, ['start', '-p', String(PORT_PH)], { env: cleanEnv({ ORBIT_DIST_DIR: ANALYTICS_DIST }), url: APP_PH + '/api/leaderboard' }));
+    servers.push(await startServer('app (no analytics key)', next, ['start', '-p', String(PORT)], { env: cleanEnv(), url: APP + '/' }));
+    servers.push(await startServer('app (fake analytics key)', next, ['start', '-p', String(PORT_PH)], { env: cleanEnv({ ORBIT_DIST_DIR: ANALYTICS_DIST }), url: APP_PH + '/' }));
     fs.writeFileSync(mockLog, ''); // forget the readiness ping
+    // safety: both apps must be on the in-memory store, never a real Redis (e.g. from .env.local)
+    // a read of the board makes each app pick its store, and say so in its log
+    await Promise.all([APP, APP_PH].map((u) => fetch(u + '/api/leaderboard').catch(() => null)));
+    for (let i = 0; i < 20 && !servers.slice(1).every((s) => s.memoryStore()); i++) await new Promise((res) => setTimeout(res, 100));
+    for (const s of servers.slice(1)) if (!s.memoryStore()) throw new Error(`${s.name} is not using the in-memory store: a Redis URL reached it (check .env.local); stopping before any shot is fired`);
   } catch (e) {
     console.log('FAIL  e2e: could not start the local servers: ' + e.message.split('\n')[0]);
     console.log(e.message);

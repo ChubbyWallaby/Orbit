@@ -675,14 +675,20 @@ function useShareButton(text: string, url: string, track: (method: 'share' | 'cl
     Promise.resolve().then(() => navigator.clipboard.writeText(text))
       .then(() => { setLabel('Copied'); setTimeout(() => setLabel(idle), 1600); }, () => setLabel(copyFailed()));
   };
+  // a second tap while the sheet is still open would be refused by the browser (and then copied)
+  const sharing = useRef(false);
   const share = async () => {
     if (!native) return copy();
+    if (sharing.current) return;
+    sharing.current = true;
     try {
       await navigator.share({ text: text.endsWith('\n' + url) ? text.slice(0, -(url.length + 1)) : text, url });
       track('share');
     } catch (e) {
       if ((e as Error)?.name === 'AbortError') return; // the pilot closed the sheet: nothing to do
       copy(); // sharing not allowed here (some in-app browsers): copy instead
+    } finally {
+      sharing.current = false;
     }
   };
   return { label, share };

@@ -16,24 +16,38 @@ export const FAKE_POSTHOG = { NEXT_PUBLIC_POSTHOG_KEY: 'phc_verify_fake_key', NE
 export const loadPlaywright = () => createRequire(import.meta.url)('playwright');
 
 /**
+ * Variables that would point a local build or server at something real. They are set to empty
+ * strings, not deleted: Next.js fills in any variable that is missing from .env.local / .env, so a
+ * deleted one would come straight back from the developer's real credentials. An empty one stays.
+ */
+export const BLANKED = [
+  'KV_REST_API_URL', 'KV_REST_API_TOKEN', 'KV_REST_API_READ_ONLY_TOKEN', 'KV_URL', 'REDIS_URL',
+  'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN',
+  'NEXT_PUBLIC_POSTHOG_KEY', 'NEXT_PUBLIC_POSTHOG_HOST', 'NEXT_PUBLIC_META_PIXEL_ID',
+  'VERCEL', 'VERCEL_ENV', 'VERCEL_URL', 'ORBIT_DAY', 'ORBIT_DIST_DIR', 'CRON_SECRET',
+];
+
+/**
  * The environment for local servers and builds: no Redis (so the in-memory store is used and
  * nothing can reach a real leaderboard), no analytics or pixel keys unless a check adds them.
  */
 export function cleanEnv(extra = {}) {
   const env = { ...process.env };
-  for (const k of Object.keys(env)) {
-    if (/^(KV_|UPSTASH_|NEXT_PUBLIC_|VERCEL)/.test(k) || k === 'ORBIT_DAY' || k === 'ORBIT_DIST_DIR') delete env[k];
-  }
+  for (const k of Object.keys(env)) if (/^(KV_|UPSTASH_|NEXT_PUBLIC_|VERCEL)/.test(k)) env[k] = '';
+  for (const k of BLANKED) env[k] = '';
   return { ...env, NEXT_TELEMETRY_DISABLED: '1', ...extra };
 }
+
+/** What the app prints when it falls back to the in-memory store (src/server/store.ts). */
+export const MEMORY_STORE_LINE = 'using the in-memory store';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Starts a process and resolves once `url` answers, or rejects with the last lines of its output. */
 export async function startServer(name, cmd, args, { env, url, timeoutMs = 60000 }) {
   const child = spawn(cmd, args, { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
-  let log = '';
-  const keep = (b) => { log = (log + b.toString()).slice(-4000); };
+  let log = '', memoryStore = false;
+  const keep = (b) => { const t = b.toString(); if (t.includes(MEMORY_STORE_LINE)) memoryStore = true; log = (log + t).slice(-4000); };
   child.stdout.on('data', keep); child.stderr.on('data', keep);
   let exited = null;
   child.on('exit', (code) => { exited = code ?? 'signal'; });
@@ -41,7 +55,7 @@ export async function startServer(name, cmd, args, { env, url, timeoutMs = 60000
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (exited !== null) throw new Error(`${name} exited (${exited}) before it was ready:\n${log}`);
-    try { if ((await fetch(url)).status < 500) return { stop, log: () => log }; } catch { /* not up yet */ }
+    try { if ((await fetch(url)).status < 500) return { name, stop, log: () => log, memoryStore: () => memoryStore }; } catch { /* not up yet */ }
     await sleep(300);
   }
   stop();
