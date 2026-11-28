@@ -26,8 +26,28 @@ let browser;
 
 // ---- page helpers ----
 
+/**
+ * Stands in for the phone's share sheet. `none`: the browser has none (as desktop Chrome);
+ * `ok`: sharing works; `abort`: the pilot closes the sheet. Calls land in window.__shares,
+ * clipboard writes in window.__copies. window.__shareMode can be changed later.
+ */
+function shareSheet(mode) {
+  window.__shareMode = mode; window.__shares = []; window.__copies = [];
+  Object.defineProperty(Navigator.prototype, 'share', {
+    configurable: true,
+    value: mode === 'none' ? undefined : async function share(data) {
+      window.__shares.push(JSON.parse(JSON.stringify(data)));
+      if (window.__shareMode === 'abort') throw new DOMException('Share canceled', 'AbortError');
+    },
+  });
+  const c = navigator.clipboard;
+  if (c) { const write = c.writeText.bind(c); c.writeText = (t) => { window.__copies.push(t); return write(t); }; }
+}
+const shares = (page) => page.evaluate(() => ({ shares: window.__shares, copies: window.__copies, search: location.search }));
+const SITE = 'https://orbitpuzzle.com';
+
 /** A brand-new visitor: fresh cookies and storage, on a phone (most players are). */
-async function visitor(base, { init } = {}) {
+async function visitor(base, { init, share = 'none' } = {}) {
   const ctx = await browser.newContext({ ...devices['iPhone 13'], deviceScaleFactor: 1, baseURL: base, permissions: ['clipboard-read', 'clipboard-write'] });
   // a real phone exposes neither webdriver nor userAgentData (whose brands say HeadlessChrome here);
   // posthog-js drops every event from a browser that looks automated
@@ -35,6 +55,7 @@ async function visitor(base, { init } = {}) {
     Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false });
     Object.defineProperty(Navigator.prototype, 'userAgentData', { get: () => undefined });
   });
+  await ctx.addInitScript(shareSheet, share);
   if (init) await ctx.addInitScript(init.fn, init.arg);
   const page = await ctx.newPage();
   const errors = [];
@@ -91,7 +112,8 @@ async function dailyFlows() {
   let firstName = null, finished = false;
 
   await r.check('new visitor fires a shot with no name and gets a generated pilot name', async () => {
-    await openPuzzle(page, '/', 'Daily #');
+    // through a shared result's link: ref=share must not get in the way
+    await openPuzzle(page, '/?ref=share', 'Daily #');
     assert(!(await page.locator('#pilot').count()), 'a name form was shown before the first shot');
     const a = await fireAt(page, 50, '/api/shot');
     assert(a.status === 200, `the shot was answered ${a.status}: ${a.body.error ?? ''}`);
@@ -137,15 +159,33 @@ async function dailyFlows() {
     assert(text.includes(`On the leaderboard as ${fresh}`), 'the result card does not show the new name');
   });
 
+  await r.check('share: with no share sheet, Copy result copies the result with a ref=share link', async () => {
+    assert(finished, 'needs a finished game');
+    if (!(await page.locator('#resTitle').isVisible())) await page.getByRole('button', { name: 'Your result' }).click();
+    const card = page.locator('.card');
+    assert(!(await card.getByRole('button', { name: 'Share', exact: true }).count()), 'a Share button is shown in a browser with no share sheet');
+    await card.getByRole('button', { name: 'Copy result' }).click();
+    await card.getByRole('button', { name: 'Copied' }).waitFor({ timeout: 5000 });
+    const { copies, search } = await shares(page);
+    assert(copies.length === 1, `expected one clipboard write, got ${copies.length}`);
+    const lines = copies[0].split('\n');
+    assert(lines[0].startsWith('ORBIT #') && lines.at(-1) === `${SITE}/?ref=share`, `copied text ends with "${lines.at(-1)}", not ${SITE}/?ref=share`);
+    assert(copies[0] === (await card.locator('.share').innerText()).trim(), 'the copied text is not the text on the card');
+    assert(new URLSearchParams(search).get('ref') === 'share', `the address lost ref=share (now "${search}")`);
+    await page.mouse.click(5, 5); // the result card closes on a click outside it
+  });
+
   await r.check('the daily flow raised no page errors', async () => assert(!errors.length, errors[0]));
   await ctx.close();
 }
 
 async function archiveFlow() {
+  const day = utcDay(new Date(Date.now() - 86400000));
+  const { ctx, page, errors } = await visitor(APP, { share: 'ok' });
+  let shot = false;
   await r.check('archive: a past day loads and accepts a shot', async () => {
-    const { ctx, page, errors } = await visitor(APP);
-    const day = utcDay(new Date(Date.now() - 86400000));
-    await openPuzzle(page, `/?day=${day}`, 'Archive · Daily #');
+    // through a shared archive result's link
+    await openPuzzle(page, `/?ref=share&day=${day}`, 'Archive · Daily #');
     const a = await fireAt(page, 120, '/api/shot');
     assert(a.status === 200, `the archive shot was answered ${a.status}: ${a.body.error ?? ''}`);
     assert(a.request.day === day, `the shot was not sent for ${day} (sent ${a.request.day})`);
@@ -153,32 +193,71 @@ async function archiveFlow() {
     // archive games are not ranked: the day board stays empty for this pilot
     const board = await pageJson(page, '/api/leaderboard?scope=day');
     assert(!board.me, 'an archive shot put the pilot on today\'s board');
-    assert(!errors.length, 'page error: ' + errors[0]);
-    await ctx.close();
+    shot = true;
   });
+
+  await r.check('share: an archive result opens the share sheet with a ref=share&day= link', async () => {
+    assert(shot, 'needs the archive check');
+    await playToEnd(page);
+    const card = page.locator('.card');
+    await page.locator('#resTitle').waitFor({ timeout: 15000 });
+    await card.getByRole('button', { name: 'Share', exact: true }).click();
+    await page.waitForFunction(() => window.__shares.length > 0, null, { timeout: 5000 });
+    const { shares: s, copies } = await shares(page);
+    assert(s.length === 1, `the share sheet was opened ${s.length} times`);
+    assert(s[0].url === `${SITE}/?ref=share&day=${day}`, `shared url is ${s[0].url}`);
+    assert(s[0].text.startsWith('ORBIT #') && s[0].text.includes('(archive)') && !s[0].text.includes('orbitpuzzle.com'), `shared text is ${JSON.stringify(s[0].text)}`);
+    assert(!copies.length, 'the clipboard was written as well as the share sheet');
+    assert(!errors.length, 'page error: ' + errors[0]);
+  });
+  await ctx.close();
 }
 
 async function voyageFlow() {
+  let voyagePage = null, win = null;
   await r.check('voyage: level 1 loads, accepts a miss, then a real win clears it', async () => {
     const { level, solution } = voyageLevels[0];
     // start with the moon where the known solution puts it, mirror turned away
     const init = { fn: ([key, p]) => { if (!sessionStorage.getItem('verify:seeded')) { localStorage.setItem(key, p); sessionStorage.setItem('verify:seeded', '1'); } }, arg: [`orbit:placement:${level.day}`, JSON.stringify({ moon: solution.moon, angle: (solution.angle + 180) % 360, satellite: null })] };
-    const { ctx, page, errors } = await visitor(APP, { init });
+    const { ctx, page, errors } = await visitor(APP, { init, share: 'abort' });
     const opened = Date.now();
-    await openPuzzle(page, '/?voyage=1', 'Voyage · Level 1');
+    await openPuzzle(page, '/?ref=share&voyage=1', 'Voyage · Level 1');
     const miss = await fireAt(page, (solution.angle + 180) % 360, '/api/voyage');
     assert(miss.status === 200, `the Voyage shot was answered ${miss.status}: ${miss.body.error ?? ''}`);
     assert(miss.body.status === 'playing' && miss.body.shots?.length === 1, `expected one shot and still playing, got ${JSON.stringify(miss.body.shots)}`);
     // wins sooner than 10 s after opening a level are turned away as scripts
     const wait = 10500 - (Date.now() - opened);
     if (wait > 0) await page.waitForTimeout(wait);
-    const win = await fireAt(page, solution.angle, '/api/voyage');
-    assert(win.status === 200, `the winning shot was answered ${win.status}: ${win.body.error ?? ''}`);
-    assert(win.body.status === 'won' && win.body.unlocked === 2, `expected a win opening level 2, got ${win.body.status} / unlocked ${win.body.unlocked}`);
+    const w = await fireAt(page, solution.angle, '/api/voyage');
+    win = w.body;
+    assert(w.status === 200, `the winning shot was answered ${w.status}: ${w.body.error ?? ''}`);
+    assert(win.status === 'won' && win.unlocked === 2, `expected a win opening level 2, got ${win.status} / unlocked ${win.unlocked}`);
     await page.locator('#voyTitle', { hasText: 'Level 1 cleared' }).waitFor({ timeout: 10000 });
     assert(!errors.length, 'page error: ' + errors[0]);
-    await ctx.close();
+    voyagePage = { ctx, page, errors };
   });
+
+  await r.check('share: a closed share sheet does nothing; a Voyage share has a ref=share&voyage= link', async () => {
+    assert(voyagePage, 'needs a cleared Voyage level');
+    const { page, errors } = voyagePage;
+    const btn = page.locator('.card').getByRole('button', { name: 'Share', exact: true });
+    await btn.click(); // the sheet is closed (AbortError)
+    await page.waitForTimeout(500);
+    let st = await shares(page);
+    assert(st.shares.length === 1, `the share sheet was opened ${st.shares.length} times`);
+    assert(!st.copies.length, 'closing the share sheet fell back to the clipboard');
+    assert(await btn.isVisible() && await page.locator('#voyTitle').isVisible(), 'closing the share sheet changed the result card');
+    await page.evaluate(() => { window.__shareMode = 'ok'; });
+    await btn.click();
+    await page.waitForFunction(() => window.__shares.length > 1, null, { timeout: 5000 });
+    st = await shares(page);
+    const last = st.shares.at(-1);
+    assert(last.url === `${SITE}/?ref=share&voyage=1`, `shared url is ${last.url}`);
+    assert(last.text === 'ORBIT Voyage · level 1 🚀\n' + '★'.repeat(win.stars) + '☆'.repeat(3 - win.stars), `shared text is ${JSON.stringify(last.text)}`);
+    assert(new URLSearchParams(st.search).get('ref') === 'share' && new URLSearchParams(st.search).get('voyage') === '1', `the address is now "${st.search}"`);
+    assert(!errors.length, 'page error: ' + errors[0]);
+  });
+  await voyagePage?.ctx.close();
 }
 
 // ---- analytics ----
@@ -193,7 +272,7 @@ function decodeBody(buf) {
 
 async function analyticsOn(mockLog) {
   await r.check('with a fake PostHog key, the raw player id never reaches the analytics host', async () => {
-    const { ctx, page } = await visitor(APP_PH);
+    const { ctx, page } = await visitor(APP_PH, { share: 'abort' });
     const toMock = [];
     ctx.on('request', async (req) => {
       if (new URL(req.url()).host !== MOCK_HOST) return;
@@ -202,6 +281,13 @@ async function analyticsOn(mockLog) {
     await openPuzzle(page, '/', 'Daily #');
     await playToEnd(page);
     await page.locator('#resTitle').waitFor({ timeout: 15000 });
+    // a closed sheet, then a real share: result_shared once
+    const shareBtn = page.locator('.card').getByRole('button', { name: 'Share', exact: true });
+    await shareBtn.click();
+    await page.waitForTimeout(300);
+    await page.evaluate(() => { window.__shareMode = 'ok'; });
+    await shareBtn.click();
+    await page.waitForFunction(() => window.__shares.length === 2, null, { timeout: 5000 });
     await page.locator('.card').getByRole('button', { name: 'Leaderboard' }).click();
     await page.getByRole('button', { name: 'Close' }).click();
     await page.evaluate(() => dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false })));
@@ -224,6 +310,8 @@ async function analyticsOn(mockLog) {
     const game = events.filter((e) => ['first_shot', 'shot', 'puzzle_finished'].includes(e.event));
     assert(game.length && game.every((e) => (e.properties?.distinct_id ?? e.distinct_id) === hashed), 'game events are not identified by the hashed player id');
     assert(events.every((e) => e.properties?.app === 'orbit'), 'an event without app=orbit');
+    const shared = events.filter((e) => e.event === 'result_shared');
+    assert(shared.length === 1 && shared[0].properties.method === 'share', `expected one result_shared (method share) for a closed sheet and a share, got ${shared.length}`);
     const cookies = (await ctx.cookies()).map((c) => c.name);
     assert(cookies.every((c) => c === 'orbit_pid'), 'a cookie other than orbit_pid was set: ' + cookies.join(', '));
     const keys = await page.evaluate(() => [...Object.keys(localStorage), ...Object.keys(sessionStorage)]);

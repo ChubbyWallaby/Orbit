@@ -46,8 +46,25 @@ export function msUntilNextPuzzle(now = new Date()): number {
   return next - now.getTime();
 }
 
-/** `archive`: a past day played later, marked so it is not mistaken for that day's result. */
-export function shareText(opts: { number: number; shots: string[]; score: number; helpers: HelperId[]; streak?: number; archive?: boolean }): string {
+/** What a shared result links to: today's puzzle, a past day, or a Voyage level. */
+export type ShareTarget = { kind: 'daily' } | { kind: 'archive'; day: string } | { kind: 'voyage'; n: number };
+
+/**
+ * The link in a shared result, tagged `ref=share` so visits from shared results can be counted.
+ * It opens the same puzzle: `?day=` for a past day, `?voyage=` for a Voyage level.
+ */
+export function shareUrl(target: ShareTarget): string {
+  const q = new URLSearchParams({ ref: 'share' });
+  if (target.kind === 'archive') q.set('day', target.day);
+  if (target.kind === 'voyage') q.set('voyage', String(target.n));
+  return `${SITE_URL}/?${q}`;
+}
+
+/**
+ * `archive`: a past day played later, marked so it is not mistaken for that day's result.
+ * `day` is that past day, for the link on the last line.
+ */
+export function shareText(opts: { number: number; shots: string[]; score: number; helpers: HelperId[]; streak?: number; archive?: boolean; day?: string }): string {
   const squares = opts.shots.map((r) => (r === 'hit' ? '🟩' : '🟥')).join('') + '⬛'.repeat(MAX_SHOTS - opts.shots.length);
   const helperIcons = opts.helpers.map((h) => ({ scanner: '📡', satellite: '🛰️', energized: '💥', ghost: '👻' })[h]).join('');
   const won = opts.shots.includes('hit');
@@ -56,13 +73,14 @@ export function shareText(opts: { number: number; shots: string[]; score: number
     `${squares}  ${won ? opts.score + ' pts' : 'beacon dark'}`,
     helperIcons ? `helpers ${helperIcons}` : 'no helpers',
     ...(!opts.archive && opts.streak && opts.streak > 1 ? [`🔥 ${opts.streak}-day streak`] : []),
-    SITE_NAME, // so anyone who sees a result can click through and play
+    // so anyone who sees a result can click through and play the same puzzle
+    shareUrl(opts.archive && opts.day ? { kind: 'archive', day: opts.day } : { kind: 'daily' }),
   ].join('\n');
 }
 
 /** Share text for a cleared Voyage level. */
 export function voyageShareText(n: number, stars: number): string {
-  return [`ORBIT Voyage · level ${n} 🚀`, '★'.repeat(stars) + '☆'.repeat(MAX_SHOTS - stars), SITE_NAME].join('\n');
+  return [`ORBIT Voyage · level ${n} 🚀`, '★'.repeat(stars) + '☆'.repeat(MAX_SHOTS - stars), shareUrl({ kind: 'voyage', n })].join('\n');
 }
 
 /** Why a shot did not reach the beacon. */

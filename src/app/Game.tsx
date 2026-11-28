@@ -1,7 +1,7 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { constrainMoon, previewLimit, trace, orbitClock, withDestroyed, SATELLITE_RADIUS, type Level, type Placement, type TraceResult, type Vec } from '@/game/engine';
-import { HELPER_ORDER, HELPERS, MAX_SHOTS, msUntilNextPuzzle, scoreFor, shareText, voyageShareText, missText, type HelperId } from '@/game/rules';
+import { HELPER_ORDER, HELPERS, MAX_SHOTS, msUntilNextPuzzle, scoreFor, shareText, shareUrl, voyageShareText, missText, type HelperId } from '@/game/rules';
 import type { OrbitScene } from '@/game/scene';
 import type { TodayPayload, VoyageInfo, VoyagePayload } from '@/server/game';
 import type { Play, Streak } from '@/server/store';
@@ -50,7 +50,10 @@ function loadPlacement(level: Level): Placement {
 
 const START_TEXT = 'Drag the moon into the beam. Turn its mirror. Light the beacon.';
 
-/** The page address says what is being played: today (/), a past day (?day=2026-11-12) or Voyage (?voyage=12). */
+/**
+ * The page address says what is being played: today (/), a past day (?day=2026-11-12) or Voyage (?voyage=12).
+ * Other parameters, such as ref=share on a shared result's link, are ignored here and kept in the address.
+ */
 function modeFromSearch(search: string): Mode {
   const q = new URLSearchParams(search);
   const day = q.get('day');
@@ -656,10 +659,44 @@ function Countdown() {
   return <b>{pad(Math.floor(s / 3600))}:{pad(Math.floor((s % 3600) / 60))}:{pad(s % 60)}</b>;
 }
 
+/** The phone's share sheet where the browser has one; the clipboard otherwise. */
+const canShare = () => typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+
+/**
+ * The share button: `text` is the clipboard text, whose last line is `url`. The share sheet gets the
+ * text without that line and the link separately. `track` is called once for each result shared.
+ */
+function useShareButton(text: string, url: string, track: (method: 'share' | 'clipboard') => void, copyFailed: () => string) {
+  const [native] = useState(canShare);
+  const idle = native ? 'Share' : 'Copy result';
+  const [label, setLabel] = useState(idle);
+  const copy = () => {
+    track('clipboard');
+    Promise.resolve().then(() => navigator.clipboard.writeText(text))
+      .then(() => { setLabel('Copied'); setTimeout(() => setLabel(idle), 1600); }, () => setLabel(copyFailed()));
+  };
+  const share = async () => {
+    if (!native) return copy();
+    try {
+      await navigator.share({ text: text.endsWith('\n' + url) ? text.slice(0, -(url.length + 1)) : text, url });
+      track('share');
+    } catch (e) {
+      if ((e as Error)?.name === 'AbortError') return; // the pilot closed the sheet: nothing to do
+      copy(); // sharing not allowed here (some in-app browsers): copy instead
+    }
+  };
+  return { label, share };
+}
+
 function ResultCard({ level, play, streak, practice, archive, name, onRename, onPractice, onMore, onClose, onBoard }: { level: Level; play: Play; streak: Streak; practice: boolean; archive: boolean; name: string | null; onRename: () => void; onPractice: () => void; onMore: () => void; onClose: () => void; onBoard: () => void }) {
-  const text = shareText({ number: level.number, shots: play.shots, score: play.score, helpers: play.helpers, streak: streak.current, archive });
-  const [copied, setCopied] = useState('Copy result');
+  const text = shareText({ number: level.number, shots: play.shots, score: play.score, helpers: play.helpers, streak: streak.current, archive, day: level.day });
   const shareRef = useRef<HTMLDivElement>(null);
+  const { label, share } = useShareButton(text, shareUrl(archive ? { kind: 'archive', day: level.day } : { kind: 'daily' }),
+    (method) => capture('result_shared', { mode: archive ? 'archive' : 'daily', number: level.number, result: play.status, method }),
+    () => {
+      const r = document.createRange(); r.selectNodeContents(shareRef.current!); const s = getSelection()!; s.removeAllRanges(); s.addRange(r);
+      return 'Press Ctrl+C';
+    });
   const [rank, setRank] = useState<{ day: number | null; all: number | null; players: number } | null>(null);
   useEffect(() => {
     if (archive) return; // archive games have no rank
@@ -667,13 +704,6 @@ function ResultCard({ level, play, streak, practice, archive, name, onRename, on
       .then(([d, a]) => setRank({ day: d.me?.rank ?? null, all: a.me?.rank ?? null, players: d.players }))
       .catch(() => setRank(null));
   }, [archive]);
-  const copy = () => {
-    capture('result_shared', { mode: archive ? 'archive' : 'daily', number: level.number, result: play.status });
-    navigator.clipboard.writeText(text).then(() => { setCopied('Copied'); setTimeout(() => setCopied('Copy result'), 1600); }, () => {
-      const r = document.createRange(); r.selectNodeContents(shareRef.current!); const s = getSelection()!; s.removeAllRanges(); s.addRange(r);
-      setCopied('Press Ctrl+C');
-    });
-  };
   const won = play.status === 'won';
   return (
     <div className="overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -698,7 +728,7 @@ function ResultCard({ level, play, streak, practice, archive, name, onRename, on
         )}
         <div className="share" ref={shareRef}>{text}</div>
         <div className="row">
-          <button className="btn primary" onClick={copy}>{copied}</button>
+          <button className="btn primary" onClick={share}>{label}</button>
           {archive ? <button className="btn" onClick={onMore}>Past days</button> : <button className="btn" onClick={onBoard}>Leaderboard</button>}
         </div>
         {!archive && <button className="btn more-cta" onClick={onMore}>Want more? Play Voyage or past days</button>}
@@ -710,11 +740,8 @@ function ResultCard({ level, play, streak, practice, archive, name, onRename, on
 }
 
 function VoyageResult({ n, stars, total, named, onJoin, onBoard, onNext, onReplay, onLevels, onClose }: { n: number; stars: number; total: number; named: boolean; onJoin: () => void; onBoard: () => void; onNext: () => void; onReplay: () => void; onLevels: () => void; onClose: () => void }) {
-  const [copied, setCopied] = useState('Copy result');
-  const copy = () => {
-    capture('result_shared', { mode: 'voyage', level: n, stars });
-    navigator.clipboard.writeText(voyageShareText(n, stars)).then(() => { setCopied('Copied'); setTimeout(() => setCopied('Copy result'), 1600); }, () => setCopied('Could not copy'));
-  };
+  const { label, share } = useShareButton(voyageShareText(n, stars), shareUrl({ kind: 'voyage', n }),
+    (method) => capture('result_shared', { mode: 'voyage', level: n, stars, method }), () => 'Could not copy');
   return (
     <div className="overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="card win" role="dialog" aria-labelledby="voyTitle">
@@ -728,7 +755,7 @@ function VoyageResult({ n, stars, total, named, onJoin, onBoard, onNext, onRepla
         <div className="row">
           <button className="btn" onClick={onReplay}>Replay</button>
           <button className="btn" onClick={onLevels}>All levels</button>
-          <button className="btn" onClick={copy}>{copied}</button>
+          <button className="btn" onClick={share}>{label}</button>
         </div>
       </div>
     </div>
